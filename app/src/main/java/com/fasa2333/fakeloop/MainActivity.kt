@@ -11,23 +11,27 @@ import androidx.activity.compose.setContent
 import androidx.core.app.ActivityCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -178,6 +182,15 @@ class MainActivity : ComponentActivity() {
                     Text(text = "跳绳800下")
                 }
 
+                Button(onClick = {
+                    // 跳绳1600下 -> send 6F040B0000003E8069B1288F015E036C
+                    val hex = "6F040B0000003E8069B1288F015E036C"
+                    val payload = hexStringToByteArray(hex)
+                    blePeripheralManager.notifySubscribers(payload)
+                }) {
+                    Text(text = "跳绳1600下")
+                }
+
                 // Send custom data button
                 Button(onClick = { showCustomDialog = true }) {
                     Text(text = "发送自定义数据")
@@ -231,8 +244,8 @@ class MainActivity : ComponentActivity() {
             if (showDisclaimer) {
                 AlertDialog(
                     onDismissRequest = { /* require explicit dismiss */ },
-                    title = { Text(text = "提示") },
-                    text = { Text(text = "仅供学习交流使用") },
+                    title = { Text(text = "免责声明") },
+                    text = { Text(text = "本软件仅供蓝牙通信技术的交流与学习使用。严禁利用本软件进行任何形式的体育打卡作弊或虚假记录。因违规使用产生的一切后果由用户自行承担，开发者不承担任何法律责任。") },
                     confirmButton = {
                         TextButton(onClick = { showDisclaimer = false }) {
                             Text(text = "我知道了")
@@ -243,15 +256,28 @@ class MainActivity : ComponentActivity() {
             }
 
             // Footer
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "by 风洒青泥",
-                fontSize = 12.sp,
-                color = Color.Black.copy(alpha = 0.5f),
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center,
-                fontStyle = FontStyle.Italic
-            )
+            val uriHandler = LocalUriHandler.current
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "by 风洒青泥",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "觉得好用吗？别忘了在github上给我点个star支持下我哦⭐~",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable {
+                        uriHandler.openUri("https://github.com/fasa70/Fake_Loop")
+                    }
+                )
+            }
         }
     }
 
