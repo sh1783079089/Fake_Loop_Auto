@@ -1,15 +1,23 @@
 *.iml
 .gradle
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+local.properties
 .DS_Store
+
+# Build outputs
 /build
-/captures
+app/build/
+app/release/
+
+# Kotlin compiler sessions
+.kotlin/
+
+# IDE - ignore most, keep team-shared config
+.idea/*
+!.idea/codeStyles/
+!.idea/inspectionProfiles/
+
 .externalNativeBuild
 .cxx
-local.properties
+/captures
+.claude/
