@@ -3,6 +3,8 @@ package com.fasa2333.fakeloop
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -14,34 +16,50 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.sp
 import com.fasa2333.fakeloop.ui.theme.FakeLoopTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var blePeripheralManager: BlePeripheralManager
+
+    // SharedPreferences keys
+    companion object {
+        private const val KEY_TARGET_JUMPS = "targetJumps"
+        private const val KEY_TARGET_TIME = "targetTime"
+        private const val KEY_RANDOM_ENABLED = "randomEnabled"
+        private const val KEY_LAST_USED_TARGET_JUMPS = "lastUsedTargetJumps"
+    }
+
+    private lateinit var prefs: SharedPreferences
+    private val scope = CoroutineScope(Dispatchers.Default)
 
     // Track whether we already started peripheral automatically at app launch
     private var autoPeripheralStarted: Boolean = false
@@ -53,12 +71,9 @@ class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        // If all requested permissions were granted, start peripheral and show name prompt
         val allGranted = permissions.values.all { it }
         if (allGranted) {
-            // If a start was pending because of missing permissions, start now
             if (pendingStartAfterPermission) {
-                // try to set name and start peripheral
                 setBluetoothName(TARGET_BT_NAME)
                 if (!blePeripheralManager.isAdvertising()) {
                     blePeripheralManager.startPeripheral()
@@ -71,7 +86,6 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun ensureNameAndStartIfAllowed() {
-        // Try to set name (requires BLUETOOTH_CONNECT on Android S+)
         setBluetoothName(TARGET_BT_NAME)
         if (hasAllNeededPermissions()) {
             if (!blePeripheralManager.isAdvertising()) {
@@ -79,7 +93,6 @@ class MainActivity : ComponentActivity() {
                 autoPeripheralStarted = true
             }
         } else {
-            // request permissions and mark pending
             pendingStartAfterPermission = true
             requestNeededPermissions()
         }
@@ -90,17 +103,19 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         blePeripheralManager = BlePeripheralManager(this)
 
-        // Request permissions at startup; if granted immediately we'll set name and start advertising.
-        // If not granted yet, permission callback will set name and start once user grants.
+        prefs = getPreferences(Context.MODE_PRIVATE)
+
+        val savedTargetJumps = prefs.getInt(KEY_TARGET_JUMPS, 800)
+        val savedTargetTime = prefs.getInt(KEY_TARGET_TIME, 400)
+        val savedRandomEnabled = prefs.getBoolean(KEY_RANDOM_ENABLED, true)
+
         if (hasAllNeededPermissions()) {
-            // permissions already granted: set name and start
             setBluetoothName(TARGET_BT_NAME)
             if (!blePeripheralManager.isAdvertising()) {
                 blePeripheralManager.startPeripheral()
                 autoPeripheralStarted = true
             }
         } else {
-            // request and mark pending start
             pendingStartAfterPermission = true
             requestNeededPermissions()
         }
@@ -108,7 +123,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             FakeLoopTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    MainContent(modifier = Modifier.padding(innerPadding))
+                    MainContent(
+                        modifier = Modifier.padding(innerPadding),
+                        savedTargetJumps = savedTargetJumps,
+                        savedTargetTime = savedTargetTime,
+                        savedRandomEnabled = savedRandomEnabled
+                    )
                 }
             }
         }
@@ -123,7 +143,9 @@ class MainActivity : ComponentActivity() {
         } else {
             perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        val toRequest = perms.filter { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        val toRequest = perms.filter {
+            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
         if (toRequest.isNotEmpty()) {
             requestPermissionLauncher.launch(toRequest.toTypedArray())
         }
@@ -131,18 +153,24 @@ class MainActivity : ComponentActivity() {
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    fun MainContent(modifier: Modifier = Modifier) {
-        // Simplified UI: big title, subtitle, jump-rope buttons, footer
-        var showCustomDialog by remember { mutableStateOf(false) }
-        var customHex by remember { mutableStateOf("") }
-        var customError by remember { mutableStateOf("") }
-        // Show disclaimer at startup
-        var showDisclaimer by remember { mutableStateOf(true) }
+    fun MainContent(
+        modifier: Modifier = Modifier,
+        savedTargetJumps: Int = 800,
+        savedTargetTime: Int = 400,
+        savedRandomEnabled: Boolean = true
+    ) {
+        var targetJumps by remember { mutableStateOf(savedTargetJumps) }
+        var targetTime by remember { mutableStateOf(savedTargetTime) }
+        var randomEnabled by remember { mutableStateOf(savedRandomEnabled) }
+        var isRunning by remember { mutableStateOf(false) }
+        var remainingSeconds by remember { mutableStateOf(0) }
+        var errorMessage by remember { mutableStateOf("") }
+
         Column(
             modifier = modifier
                 .fillMaxSize()
                 .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // Title
             Text(
@@ -160,99 +188,104 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth()
             )
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.weight(0.5f))
 
-            // Jump-rope buttons (primary interactive elements)
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = {
-                    // 开始跳绳 -> send 6F0201000072
-                    val hex = "6F0201000072"
-                    val payload = hexStringToByteArray(hex)
-                    blePeripheralManager.notifySubscribers(payload)
-                }) {
-                    Text(text = "开始跳绳")
-                }
-
-                Button(onClick = {
-                    // 跳绳800下 -> send 6F040B0000001F406930005703D802A8
-                    val hex = "6F040B0000001F406930005703D802A8"
-                    val payload = hexStringToByteArray(hex)
-                    blePeripheralManager.notifySubscribers(payload)
-                }) {
-                    Text(text = "跳绳800下")
-                }
-
-                Button(onClick = {
-                    // 跳绳1600下 -> send 6F040B0000003E8069B1288F015E036C
-                    val hex = "6F040B0000003E8069B1288F015E036C"
-                    val payload = hexStringToByteArray(hex)
-                    blePeripheralManager.notifySubscribers(payload)
-                }) {
-                    Text(text = "跳绳1600下")
-                }
-
-                // Send custom data button
-                Button(onClick = { showCustomDialog = true }) {
-                    Text(text = "发送自定义数据")
-                }
+            // 1. Switch row: "为跳数增加随机值"
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("为跳数增加随机值")
+                Switch(checked = randomEnabled, onCheckedChange = { newVal ->
+                    randomEnabled = newVal
+                    prefs.edit().putBoolean(KEY_RANDOM_ENABLED, newVal).apply()
+                })
             }
 
-            if (showCustomDialog) {
-                AlertDialog(
-                    onDismissRequest = { showCustomDialog = false; customHex = ""; customError = "" },
-                    title = { Text(text = "发送自定义 Hex") },
-                    text = {
-                        Column {
-                            Text(text = "请输入十六进制字符串（例如 6F0201000072）：", fontSize = 12.sp)
-                            TextField(
-                                value = customHex,
-                                onValueChange = { customHex = it; customError = "" },
-                                placeholder = { Text(text = "Hex 字符串") },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            if (customError.isNotEmpty()) {
-                                Text(text = customError, color = Color.Red, fontSize = 12.sp)
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            val hex = customHex.replace("\\s".toRegex(), "")
-                            val ok = hex.matches(Regex("^[0-9a-fA-F]+$")) && hex.length % 2 == 0
-                            if (!ok) {
-                                customError = "输入不是有效的偶数长度十六进制字符串"
-                                return@TextButton
-                            }
-                            val payload = try {
-                                hexStringToByteArray(hex)
-                            } catch (e: Exception) {
-                                customError = "Hex 转换失败"
-                                return@TextButton
-                            }
-                            blePeripheralManager.notifySubscribers(payload)
-                            showCustomDialog = false
-                            customHex = ""
-                        }) { Text("发送") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showCustomDialog = false; customHex = ""; customError = "" }) { Text("取消") }
+            // 2. 目标跳数输入框
+            OutlinedTextField(
+                value = targetJumps.toString(),
+                onValueChange = { s ->
+                    val v = s.toIntOrNull() ?: 800
+                    val clamped = v.coerceIn(1..60000)
+                    targetJumps = clamped
+                    errorMessage = ""
+                    prefs.edit().putInt(KEY_TARGET_JUMPS, clamped).apply()
+                },
+                label = { Text("请输入目标跳数") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // 3. 目标时间输入框
+            OutlinedTextField(
+                value = targetTime.toString(),
+                onValueChange = { s ->
+                    val v = s.toIntOrNull() ?: 400
+                    val clamped = v.coerceIn(1..60000)
+                    targetTime = clamped
+                    errorMessage = ""
+                    prefs.edit().putInt(KEY_TARGET_TIME, clamped).apply()
+                },
+                label = { Text("请输入目标时间(秒)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // Error message
+            if (errorMessage.isNotEmpty()) {
+                Text(text = errorMessage, color = Color.Red, fontSize = 14.sp)
+            }
+
+            // 4. 倒计时显示
+            if (isRunning) {
+                Text(text = "剩余 ${remainingSeconds} 秒", fontSize = 24.sp, color = Color.Red)
+            }
+
+            // 5. 开始跳绳按钮
+            Button(onClick = {
+                if (isRunning) return@Button
+
+                val jumps = targetJumps
+                val time = targetTime
+                if (jumps <= 0 || time <= 0) {
+                    errorMessage = "目标跳数和目标时间必须大于 0"
+                    return@Button
+                }
+
+                isRunning = true
+                errorMessage = ""
+
+                // 发送开始包
+                blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
+
+                // 初始化状态
+                val finalTarget = if (randomEnabled) jumps + (0..50).random() else jumps
+                var currentJumps = 0
+                var remaining = time
+                remainingSeconds = remaining
+
+                scope.launch {
+                    while (remaining > 0) {
+                        val remainingJumps = finalTarget - currentJumps
+                        val baseInc = if (remaining > 0) remainingJumps / remaining else 0
+                        val randInc = (0..2).random()
+                        var actualInc = baseInc + randInc
+                        if (actualInc > remainingJumps) actualInc = remainingJumps
+
+                        currentJumps += actualInc
+                        val hexJumps = (currentJumps * 10).toString(16).padStart(4, '0').uppercase()
+                        val payload = "6F040B000000${hexJumps}6930005703D802A8"
+                        blePeripheralManager.notifySubscribers(hexStringToByteArray(payload))
+
+                        remaining--
+                        remainingSeconds = remaining
+                        delay(1000)
                     }
-                )
-            }
 
-            // Startup disclaimer dialog
-            if (showDisclaimer) {
-                AlertDialog(
-                    onDismissRequest = { /* require explicit dismiss */ },
-                    title = { Text(text = "免责声明") },
-                    text = { Text(text = "本软件仅供蓝牙通信技术的交流与学习使用。严禁利用本软件进行任何形式的体育打卡作弊或虚假记录。因违规使用产生的一切后果由用户自行承担，开发者不承担任何法律责任。") },
-                    confirmButton = {
-                        TextButton(onClick = { showDisclaimer = false }) {
-                            Text(text = "我知道了")
-                        }
-                    },
-                    dismissButton = null
-                )
+                    // 结束
+                    isRunning = false
+                    prefs.edit().putInt(KEY_LAST_USED_TARGET_JUMPS, jumps).apply()
+                }
+            }, enabled = !isRunning) {
+                Text(if (isRunning) "跳绳中..." else "开始跳绳")
             }
 
             // Footer
@@ -281,23 +314,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
+    }
+
     @SuppressLint("MissingPermission")
     private fun setBluetoothName(name: String): Boolean {
         try {
             val adapter = BluetoothAdapter.getDefaultAdapter() ?: return false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                    // Request permission and return false for now
+                if (ActivityCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
                     requestPermissionLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT))
                     return false
                 }
             }
-            // Prefer setName when available
             try {
                 val method = BluetoothAdapter::class.java.getMethod("setName", String::class.java)
                 method.invoke(adapter, name)
             } catch (ex: Exception) {
-                // Fallback to property if available
                 adapter.name = name
             }
             return true
@@ -307,14 +346,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Helper: convert hex string to ByteArray
     private fun hexStringToByteArray(s: String): ByteArray {
         val cleaned = s.replace("\\s".toRegex(), "")
         val len = cleaned.length
         val data = ByteArray(len / 2)
         var i = 0
         while (i < len) {
-            data[i / 2] = ((Character.digit(cleaned[i], 16) shl 4) + Character.digit(cleaned[i + 1], 16)).toByte()
+            data[i / 2] =
+                ((Character.digit(cleaned[i], 16) shl 4) + Character.digit(cleaned[i + 1], 16)).toByte()
             i += 2
         }
         return data
@@ -322,11 +361,23 @@ class MainActivity : ComponentActivity() {
 
     private fun hasAllNeededPermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED &&
-                    ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
-                    ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.BLUETOOTH_ADVERTISE
+            ) == PackageManager.PERMISSION_GRANTED &&
+                    ActivityCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) == PackageManager.PERMISSION_GRANTED &&
+                    ActivityCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.BLUETOOTH_SCAN
+                    ) == PackageManager.PERMISSION_GRANTED
         } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
         }
     }
 }
