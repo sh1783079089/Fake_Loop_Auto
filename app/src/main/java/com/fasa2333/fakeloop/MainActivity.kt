@@ -1,6 +1,7 @@
 package com.fasa2333.fakeloop
 
 import android.Manifest
+import android.app.AlertDialog
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
@@ -101,6 +102,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // 显示免责声明对话框
+        AlertDialog.Builder(this)
+            .setTitle("免责声明")
+            .setMessage("本软件仅供蓝牙通信技术的交流与学习使用。严禁利用本软件进行任何形式的体育打卡作弊或虚假记录。因违规使用产生的一切后果由用户自行承担，开发者不承担任何法律责任。")
+            .setPositiveButton("我知道了") { _, _ ->
+                // 用户确认后继续初始化
+                blePeripheralManager = BlePeripheralManager(this)
+                prefs = getPreferences(Context.MODE_PRIVATE)
+            }
+            .show()
+
         blePeripheralManager = BlePeripheralManager(this)
 
         prefs = getPreferences(Context.MODE_PRIVATE)
