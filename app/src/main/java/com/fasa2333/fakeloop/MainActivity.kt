@@ -3,17 +3,19 @@ package com.fasa2333.fakeloop
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.core.app.ActivityCompat
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,17 +24,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.runtime.*
+import androidx.compose.material3.TextField
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -42,6 +50,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
 import com.fasa2333.fakeloop.ui.theme.FakeLoopTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -51,31 +60,43 @@ import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private lateinit var blePeripheralManager: BlePeripheralManager
+    private lateinit var prefs: SharedPreferences
 
     private var autoPeripheralStarted: Boolean = false
     private var pendingStartAfterPermission: Boolean = false
 
-    private val TARGET_BT_NAME = "LR029429BD"
+    private val targetBtName = "LR029429BD"
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
-        if (allGranted) {
-            if (pendingStartAfterPermission) {
-                setBluetoothName(TARGET_BT_NAME)
-                if (!blePeripheralManager.isAdvertising()) {
-                    blePeripheralManager.startPeripheral()
-                    autoPeripheralStarted = true
-                }
-                pendingStartAfterPermission = false
+        if (allGranted && pendingStartAfterPermission) {
+            setBluetoothName(targetBtName)
+            if (!blePeripheralManager.isAdvertising()) {
+                blePeripheralManager.startPeripheral()
+                autoPeripheralStarted = true
             }
+            pendingStartAfterPermission = false
         }
+    }
+
+    companion object {
+        private const val KEY_TARGET_JUMPS = "targetJumps"
+        private const val KEY_TARGET_TIME = "targetTime"
+        private const val KEY_DECEL_RATE = "decelRate"
+        private const val KEY_RANDOM_ENABLED = "randomEnabled"
+        private const val KEY_LAST_USED_TARGET_JUMPS = "lastUsedTargetJumps"
+        private const val DEFAULT_TARGET_JUMPS = 800
+        private const val DEFAULT_TARGET_TIME = 400
+        private const val DEFAULT_DECEL_RATE = "0.2"
+        private const val MAX_PACKET_JUMPS = 6553
+        private const val RANDOM_JUMP_MAX = 50
     }
 
     @SuppressLint("MissingPermission")
     private fun ensureNameAndStartIfAllowed() {
-        setBluetoothName(TARGET_BT_NAME)
+        setBluetoothName(targetBtName)
         if (hasAllNeededPermissions()) {
             if (!blePeripheralManager.isAdvertising()) {
                 blePeripheralManager.startPeripheral()
@@ -90,18 +111,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        blePeripheralManager = BlePeripheralManager(this)
 
-        if (hasAllNeededPermissions()) {
-            setBluetoothName(TARGET_BT_NAME)
-            if (!blePeripheralManager.isAdvertising()) {
-                blePeripheralManager.startPeripheral()
-                autoPeripheralStarted = true
-            }
-        } else {
-            pendingStartAfterPermission = true
-            requestNeededPermissions()
-        }
+        blePeripheralManager = BlePeripheralManager(this)
+        prefs = getPreferences(Context.MODE_PRIVATE)
+        ensureNameAndStartIfAllowed()
 
         setContent {
             FakeLoopTheme {
@@ -121,15 +134,14 @@ class MainActivity : ComponentActivity() {
         } else {
             perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        val toRequest = perms.filter { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        val toRequest = perms.filter {
+            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
         if (toRequest.isNotEmpty()) {
             requestPermissionLauncher.launch(toRequest.toTypedArray())
         }
     }
 
-    // Build a 16-byte result packet for the given jump count.
-    // bytes[6-7] = count * 10 (big-endian); bytes[8-14] linearly interpolated from two
-    // known real-device captures (N=800 and N=1600); bytes[15] = sum checksum.
     private fun buildJumpPacket(count: Int): ByteArray {
         val packet = ByteArray(16)
         packet[0] = 0x6F.toByte()
@@ -142,10 +154,8 @@ class MainActivity : ComponentActivity() {
         val raw = count * 10
         packet[6] = ((raw shr 8) and 0xFF).toByte()
         packet[7] = (raw and 0xFF).toByte()
-
         packet[8] = 0x69.toByte()
 
-        // Reference samples: N=800 and N=1600 (bytes 9-14)
         val refA = intArrayOf(0x30, 0x00, 0x57, 0x03, 0xD8, 0x02)
         val refB = intArrayOf(0xB1, 0x28, 0x8F, 0x01, 0x5E, 0x03)
         val t = (count - 800.0) / 800.0
@@ -154,25 +164,25 @@ class MainActivity : ComponentActivity() {
         }
 
         var sum = 0
-        for (i in 0..14) sum += packet[i].toInt() and 0xFF
+        for (i in 0..14) {
+            sum += packet[i].toInt() and 0xFF
+        }
         packet[15] = (sum and 0xFF).toByte()
-
         return packet
     }
 
-    // Linear deceleration model with ±5% random noise. Speed never drops below 30% of avg.
     private fun calcCurrentSpeed(elapsedSec: Long, totalSec: Long, avgJpm: Double, decelRate: Double): Double {
-        val t = elapsedSec.toDouble()
-        val d = totalSec.toDouble().coerceAtLeast(1.0)
-        val linear = avgJpm * (1.0 + decelRate) - (2.0 * decelRate * avgJpm / d) * t
+        val elapsed = elapsedSec.toDouble()
+        val duration = totalSec.toDouble().coerceAtLeast(1.0)
+        val linear = avgJpm * (1.0 + decelRate) - (2.0 * decelRate * avgJpm / duration) * elapsed
         val noise = (Math.random() - 0.5) * avgJpm * 0.05
         return maxOf(avgJpm * 0.3, linear + noise)
     }
 
     private fun formatTime(seconds: Long): String {
-        val m = seconds / 60
-        val s = seconds % 60
-        return "%02d:%02d".format(m, s)
+        val minutes = seconds / 60
+        val restSeconds = seconds % 60
+        return "%02d:%02d".format(minutes, restSeconds)
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -183,15 +193,26 @@ class MainActivity : ComponentActivity() {
         var customError by remember { mutableStateOf("") }
         var showDisclaimer by remember { mutableStateOf(true) }
 
-        // Auto jump state
-        var autoCountStr by remember { mutableStateOf("800") }
-        var autoSpeedStr by remember { mutableStateOf("120") }
-        var autoDecelStr by remember { mutableStateOf("0.2") }
+        var targetJumpsStr by remember {
+            mutableStateOf(prefs.getInt(KEY_TARGET_JUMPS, DEFAULT_TARGET_JUMPS).toString())
+        }
+        var targetTimeStr by remember {
+            mutableStateOf(prefs.getInt(KEY_TARGET_TIME, DEFAULT_TARGET_TIME).toString())
+        }
+        var decelRateStr by remember {
+            mutableStateOf(prefs.getString(KEY_DECEL_RATE, DEFAULT_DECEL_RATE) ?: DEFAULT_DECEL_RATE)
+        }
+        var randomEnabled by remember {
+            mutableStateOf(prefs.getBoolean(KEY_RANDOM_ENABLED, true))
+        }
         var isAutoRunning by remember { mutableStateOf(false) }
+        var isAutoPaused by remember { mutableStateOf(false) }
         var autoProgress by remember { mutableStateOf(0) }
         var autoTotal by remember { mutableStateOf(0) }
         var autoCurrentSpeed by remember { mutableStateOf(0.0) }
         var autoElapsedSec by remember { mutableStateOf(0L) }
+        var autoTotalSec by remember { mutableStateOf(0L) }
+        var autoError by remember { mutableStateOf("") }
         val autoScope = rememberCoroutineScope()
         var autoJob by remember { mutableStateOf<Job?>(null) }
 
@@ -210,7 +231,7 @@ class MainActivity : ComponentActivity() {
             )
 
             Text(
-                text = "若小程序扫描不到设备，请检查是否给予了Fake Loop所需的权限，或在系统设置里修改设备名称为\"LR029429BD\"",
+                text = "若小程序扫描不到设备，请检查是否给予 Fake Loop 所需的权限，或在系统设置里修改设备名称为 \"$targetBtName\"。",
                 fontSize = 12.sp,
                 color = Color.Gray,
                 modifier = Modifier.fillMaxWidth()
@@ -221,42 +242,81 @@ class MainActivity : ComponentActivity() {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Button(onClick = {
-                    blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
-                }) {
-                    Text(text = "开始跳绳")
+                Button(
+                    onClick = {
+                        blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "发送开始包")
                 }
 
-                Button(onClick = {
-                    blePeripheralManager.notifySubscribers(hexStringToByteArray("6F040B0000001F406930005703D802A8"))
-                }) {
-                    Text(text = "跳绳800下")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            blePeripheralManager.notifySubscribers(buildJumpPacket(800))
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = "发送 800 下")
+                    }
+
+                    Button(
+                        onClick = {
+                            blePeripheralManager.notifySubscribers(buildJumpPacket(1600))
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = "发送 1600 下")
+                    }
                 }
 
-                Button(onClick = {
-                    blePeripheralManager.notifySubscribers(hexStringToByteArray("6F040B0000003E8069B1288F015E036C"))
-                }) {
-                    Text(text = "跳绳1600下")
-                }
-
-                Button(onClick = { showCustomDialog = true }) {
+                Button(
+                    onClick = { showCustomDialog = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Text(text = "发送自定义数据")
                 }
             }
 
             HorizontalDivider()
 
-            // ── Auto jump section ──────────────────────────────────────
             Text(
                 text = "自动跳绳",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold
             )
 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "为目标跳数增加随机值")
+                Switch(
+                    checked = randomEnabled,
+                    onCheckedChange = { enabled ->
+                        if (!isAutoRunning) {
+                            randomEnabled = enabled
+                            prefs.edit().putBoolean(KEY_RANDOM_ENABLED, enabled).apply()
+                        }
+                    },
+                    enabled = !isAutoRunning
+                )
+            }
+
             OutlinedTextField(
-                value = autoCountStr,
-                onValueChange = { if (!isAutoRunning) autoCountStr = it.filter { c -> c.isDigit() } },
-                label = { Text("总次数") },
+                value = targetJumpsStr,
+                onValueChange = { value ->
+                    if (!isAutoRunning) {
+                        targetJumpsStr = value.filter { it.isDigit() }
+                        autoError = ""
+                    }
+                },
+                label = { Text("目标跳数") },
                 suffix = { Text("下") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
@@ -265,10 +325,15 @@ class MainActivity : ComponentActivity() {
             )
 
             OutlinedTextField(
-                value = autoSpeedStr,
-                onValueChange = { if (!isAutoRunning) autoSpeedStr = it.filter { c -> c.isDigit() } },
-                label = { Text("平均速度") },
-                suffix = { Text("次/分钟") },
+                value = targetTimeStr,
+                onValueChange = { value ->
+                    if (!isAutoRunning) {
+                        targetTimeStr = value.filter { it.isDigit() }
+                        autoError = ""
+                    }
+                },
+                label = { Text("目标时间") },
+                suffix = { Text("秒") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isAutoRunning,
@@ -276,8 +341,13 @@ class MainActivity : ComponentActivity() {
             )
 
             OutlinedTextField(
-                value = autoDecelStr,
-                onValueChange = { if (!isAutoRunning) autoDecelStr = it },
+                value = decelRateStr,
+                onValueChange = { value ->
+                    if (!isAutoRunning) {
+                        decelRateStr = value.filter { it.isDigit() || it == '.' }
+                        autoError = ""
+                    }
+                },
                 label = { Text("减速率") },
                 placeholder = { Text("0~1，0 为匀速") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -286,32 +356,68 @@ class MainActivity : ComponentActivity() {
                 singleLine = true
             )
 
+            if (autoError.isNotEmpty()) {
+                Text(text = autoError, color = Color.Red, fontSize = 14.sp)
+            }
+
             if (!isAutoRunning) {
                 Button(
                     onClick = {
-                        val total = autoCountStr.toIntOrNull()?.takeIf { it > 0 } ?: return@Button
-                        val avgJpm = autoSpeedStr.toIntOrNull()?.takeIf { it > 0 } ?: return@Button
-                        val decel = autoDecelStr.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f
+                        val requestedTotal = targetJumpsStr.toIntOrNull()
+                        val totalSec = targetTimeStr.toLongOrNull()
+                        val decel = decelRateStr.toDoubleOrNull()?.coerceIn(0.0, 1.0)
+
+                        val maxRequestedTotal = MAX_PACKET_JUMPS - if (randomEnabled) RANDOM_JUMP_MAX else 0
+                        if (requestedTotal == null || requestedTotal <= 0 || requestedTotal > maxRequestedTotal) {
+                            autoError = "目标跳数需为 1~$maxRequestedTotal 的整数"
+                            return@Button
+                        }
+                        if (totalSec == null || totalSec <= 0 || totalSec > 60000) {
+                            autoError = "目标时间需为 1~60000 秒"
+                            return@Button
+                        }
+                        if (decel == null) {
+                            autoError = "减速率需为 0~1 之间的小数"
+                            return@Button
+                        }
+
+                        val total = requestedTotal + if (randomEnabled) (0..RANDOM_JUMP_MAX).random() else 0
+                        val avgJpm = total.toDouble() / totalSec * 60.0
+                        prefs.edit()
+                            .putInt(KEY_TARGET_JUMPS, requestedTotal)
+                            .putInt(KEY_TARGET_TIME, totalSec.toInt())
+                            .putString(KEY_DECEL_RATE, decelRateStr)
+                            .putBoolean(KEY_RANDOM_ENABLED, randomEnabled)
+                            .apply()
 
                         autoTotal = total
+                        autoTotalSec = totalSec
                         autoProgress = 0
                         autoElapsedSec = 0L
-                        autoCurrentSpeed = avgJpm.toDouble()
+                        autoCurrentSpeed = avgJpm
+                        autoError = ""
                         isAutoRunning = true
+                        isAutoPaused = false
 
                         autoJob = autoScope.launch {
                             blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
 
-                            val totalSec = (total.toDouble() / avgJpm * 60).toLong().coerceAtLeast(1L)
                             var elapsed = 0L
                             var current = 0
-
-                            while (current < total && isActive) {
+                            while (elapsed < totalSec && current < total && isActive) {
                                 delay(1000L)
+                                if (isAutoPaused) {
+                                    continue
+                                }
+
                                 elapsed++
-                                val speed = calcCurrentSpeed(elapsed, totalSec, avgJpm.toDouble(), decel.toDouble())
+                                val speed = calcCurrentSpeed(elapsed, totalSec, avgJpm, decel)
                                 val increment = (speed / 60).roundToInt().coerceAtLeast(1)
-                                current = minOf(total, current + increment)
+                                current = if (elapsed >= totalSec) {
+                                    total
+                                } else {
+                                    minOf(total, current + increment)
+                                }
                                 autoProgress = current
                                 autoCurrentSpeed = speed
                                 autoElapsedSec = elapsed
@@ -320,8 +426,10 @@ class MainActivity : ComponentActivity() {
 
                             if (isActive) {
                                 blePeripheralManager.notifySubscribers(buildJumpPacket(total))
+                                prefs.edit().putInt(KEY_LAST_USED_TARGET_JUMPS, total).apply()
                             }
                             isAutoRunning = false
+                            isAutoPaused = false
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -344,34 +452,52 @@ class MainActivity : ComponentActivity() {
                         color = Color.Gray
                     )
                     Text(
-                        text = "用时：${formatTime(autoElapsedSec)}",
+                        text = "用时：${formatTime(autoElapsedSec)}，剩余：${formatTime((autoTotalSec - autoElapsedSec).coerceAtLeast(0L))}",
                         fontSize = 14.sp,
                         color = Color.Gray
                     )
                     Spacer(Modifier.height(4.dp))
-                    Button(
-                        onClick = {
-                            autoJob?.cancel()
-                            isAutoRunning = false
-                        },
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("停止")
+                        Button(
+                            onClick = { isAutoPaused = !isAutoPaused },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(if (isAutoPaused) "继续" else "暂停")
+                        }
+                        Button(
+                            onClick = {
+                                autoJob?.cancel()
+                                isAutoRunning = false
+                                isAutoPaused = false
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("停止")
+                        }
                     }
                 }
             }
-            // ── End auto jump section ──────────────────────────────────
 
             if (showCustomDialog) {
                 AlertDialog(
-                    onDismissRequest = { showCustomDialog = false; customHex = ""; customError = "" },
+                    onDismissRequest = {
+                        showCustomDialog = false
+                        customHex = ""
+                        customError = ""
+                    },
                     title = { Text(text = "发送自定义 Hex") },
                     text = {
                         Column {
-                            Text(text = "请输入十六进制字符串（例如 6F0201000072）：", fontSize = 12.sp)
+                            Text(text = "请输入十六进制字符串，例如 6F0201000072：", fontSize = 12.sp)
                             TextField(
                                 value = customHex,
-                                onValueChange = { customHex = it; customError = "" },
+                                onValueChange = {
+                                    customHex = it
+                                    customError = ""
+                                },
                                 placeholder = { Text(text = "Hex 字符串") },
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -381,35 +507,51 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = {
-                            val hex = customHex.replace("\\s".toRegex(), "")
-                            val ok = hex.matches(Regex("^[0-9a-fA-F]+$")) && hex.length % 2 == 0
-                            if (!ok) {
-                                customError = "输入不是有效的偶数长度十六进制字符串"
-                                return@TextButton
+                        TextButton(
+                            onClick = {
+                                val hex = customHex.replace("\\s".toRegex(), "")
+                                val ok = hex.matches(Regex("^[0-9a-fA-F]+$")) && hex.length % 2 == 0
+                                if (!ok) {
+                                    customError = "输入不是有效的偶数长度十六进制字符串"
+                                    return@TextButton
+                                }
+                                val payload = try {
+                                    hexStringToByteArray(hex)
+                                } catch (e: Exception) {
+                                    customError = "Hex 转换失败"
+                                    return@TextButton
+                                }
+                                blePeripheralManager.notifySubscribers(payload)
+                                showCustomDialog = false
+                                customHex = ""
                             }
-                            val payload = try {
-                                hexStringToByteArray(hex)
-                            } catch (e: Exception) {
-                                customError = "Hex 转换失败"
-                                return@TextButton
-                            }
-                            blePeripheralManager.notifySubscribers(payload)
-                            showCustomDialog = false
-                            customHex = ""
-                        }) { Text("发送") }
+                        ) {
+                            Text("发送")
+                        }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showCustomDialog = false; customHex = ""; customError = "" }) { Text("取消") }
+                        TextButton(
+                            onClick = {
+                                showCustomDialog = false
+                                customHex = ""
+                                customError = ""
+                            }
+                        ) {
+                            Text("取消")
+                        }
                     }
                 )
             }
 
             if (showDisclaimer) {
                 AlertDialog(
-                    onDismissRequest = { /* require explicit dismiss */ },
+                    onDismissRequest = { },
                     title = { Text(text = "免责声明") },
-                    text = { Text(text = "本软件仅供蓝牙通信技术的交流与学习使用。严禁利用本软件进行任何形式的体育打卡作弊或虚假记录。因违规使用产生的一切后果由用户自行承担，开发者不承担任何法律责任。") },
+                    text = {
+                        Text(
+                            text = "本软件仅供蓝牙通信技术的交流与学习使用。严禁利用本软件进行任何形式的体育打卡作弊或虚假记录。因违规使用产生的一切后果由用户自行承担，开发者不承担任何法律责任。"
+                        )
+                    },
                     confirmButton = {
                         TextButton(onClick = { showDisclaimer = false }) {
                             Text(text = "我知道了")
@@ -433,7 +575,7 @@ class MainActivity : ComponentActivity() {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "觉得好用吗？别忘了戳这里前往 GitHub，给我点个 Star 支持下我哦⭐~",
+                    text = "觉得好用吗？点这里前往 GitHub，给项目一个 Star 支持一下。",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.clickable {
@@ -449,7 +591,11 @@ class MainActivity : ComponentActivity() {
         try {
             val adapter = BluetoothAdapter.getDefaultAdapter() ?: return false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                if (ActivityCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
                     requestPermissionLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT))
                     return false
                 }
@@ -473,7 +619,8 @@ class MainActivity : ComponentActivity() {
         val data = ByteArray(len / 2)
         var i = 0
         while (i < len) {
-            data[i / 2] = ((Character.digit(cleaned[i], 16) shl 4) + Character.digit(cleaned[i + 1], 16)).toByte()
+            data[i / 2] =
+                ((Character.digit(cleaned[i], 16) shl 4) + Character.digit(cleaned[i + 1], 16)).toByte()
             i += 2
         }
         return data
@@ -481,11 +628,23 @@ class MainActivity : ComponentActivity() {
 
     private fun hasAllNeededPermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED &&
-                    ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
-                    ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.BLUETOOTH_ADVERTISE
+            ) == PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.BLUETOOTH_CONNECT
+                ) == PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.BLUETOOTH_SCAN
+                ) == PackageManager.PERMISSION_GRANTED
         } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
         }
     }
 }
