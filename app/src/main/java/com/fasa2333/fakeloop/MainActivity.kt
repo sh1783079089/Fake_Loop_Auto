@@ -3,6 +3,8 @@ package com.fasa2333.fakeloop
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -38,8 +41,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -59,6 +64,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
@@ -122,6 +128,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_RANDOM_ENABLED = "randomEnabled"
         private const val KEY_KEEP_SCREEN_ON = "keepScreenOn"
         private const val KEY_AUTO_START_ON_REQUEST = "autoStartOnRequest"
+        private const val KEY_RESPOND_TO_START_REQUEST = "respondToStartRequest"
         private const val KEY_LAST_USED_TARGET_JUMPS = "lastUsedTargetJumps"
         private const val DEFAULT_TARGET_JUMPS = 800
         private const val DEFAULT_TARGET_TIME = 400
@@ -185,6 +192,12 @@ class MainActivity : ComponentActivity() {
 
     private fun clearDebugLogs() {
         bleDebugLogs.clear()
+    }
+
+    private fun copyToClipboard(label: String, text: String) {
+        val manager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        manager.setPrimaryClip(ClipData.newPlainText(label, text))
+        addDebugLog("EVT", "Clipboard", "", "已复制：$label")
     }
 
     private fun requestNeededPermissions() {
@@ -288,6 +301,9 @@ class MainActivity : ComponentActivity() {
         var autoStartOnRequest by remember {
             mutableStateOf(prefs.getBoolean(KEY_AUTO_START_ON_REQUEST, false))
         }
+        var respondToStartRequest by remember {
+            mutableStateOf(prefs.getBoolean(KEY_RESPOND_TO_START_REQUEST, true))
+        }
         var isAutoRunning by remember { mutableStateOf(false) }
         var isAutoPaused by remember { mutableStateOf(false) }
         var autoProgress by remember { mutableStateOf(0) }
@@ -297,6 +313,9 @@ class MainActivity : ComponentActivity() {
         var autoElapsedSec by remember { mutableStateOf(0L) }
         var autoTotalSec by remember { mutableStateOf(0L) }
         var autoError by remember { mutableStateOf("") }
+        var lastCompletedJumps by remember {
+            mutableStateOf(prefs.getInt(KEY_LAST_USED_TARGET_JUMPS, 0))
+        }
         val autoScope = rememberCoroutineScope()
         var autoJob by remember { mutableStateOf<Job?>(null) }
 
@@ -356,6 +375,7 @@ class MainActivity : ComponentActivity() {
                 .putBoolean(KEY_RANDOM_ENABLED, randomEnabled)
                 .putBoolean(KEY_KEEP_SCREEN_ON, keepScreenOnEnabled)
                 .putBoolean(KEY_AUTO_START_ON_REQUEST, autoStartOnRequest)
+                .putBoolean(KEY_RESPOND_TO_START_REQUEST, respondToStartRequest)
                 .apply()
 
             autoTotal = total
@@ -399,6 +419,7 @@ class MainActivity : ComponentActivity() {
                 if (isActive) {
                     blePeripheralManager.notifySubscribers(buildJumpPacket(total))
                     prefs.edit().putInt(KEY_LAST_USED_TARGET_JUMPS, total).apply()
+                    lastCompletedJumps = total
                 }
                 isAutoRunning = false
                 isAutoPaused = false
@@ -408,6 +429,7 @@ class MainActivity : ComponentActivity() {
 
         DisposableEffect(
             autoStartOnRequest,
+            respondToStartRequest,
             isAutoRunning,
             targetJumpsStr,
             targetTimeStr,
@@ -417,6 +439,7 @@ class MainActivity : ComponentActivity() {
             randomEnabled,
             keepScreenOnEnabled
         ) {
+            blePeripheralManager.respondToStartRequest = respondToStartRequest
             blePeripheralManager.startRequestListener = {
                 runOnUiThread {
                     if (autoStartOnRequest && !isAutoRunning) {
@@ -436,14 +459,25 @@ class MainActivity : ComponentActivity() {
 
         Scaffold(
             modifier = Modifier.fillMaxSize(),
+            containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
-                NavigationBar {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 2.dp
+                ) {
                     AppPage.entries.forEach { page ->
                         NavigationBarItem(
                             selected = currentPage == page,
                             onClick = { currentPage = page },
                             icon = { NavIcon(page = page) },
-                            label = { Text(page.label) }
+                            label = { Text(page.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.onPrimary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primary,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         )
                     }
                 }
@@ -454,13 +488,14 @@ class MainActivity : ComponentActivity() {
                     .padding(innerPadding)
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 when (currentPage) {
                     AppPage.Home -> HomeScreen(
                         latestLog = bleDebugLogs.firstOrNull(),
                         isAutoRunning = isAutoRunning,
+                        lastCompletedJumps = lastCompletedJumps,
                         onSendStart = {
                             blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
                         },
@@ -469,6 +504,11 @@ class MainActivity : ComponentActivity() {
                         },
                         onSend1600 = {
                             blePeripheralManager.notifySubscribers(buildJumpPacket(1600))
+                        },
+                        onResendLast = {
+                            if (lastCompletedJumps > 0) {
+                                blePeripheralManager.notifySubscribers(buildJumpPacket(lastCompletedJumps))
+                            }
                         },
                         onOpenAuto = { currentPage = AppPage.Auto },
                         onOpenDebug = { currentPage = AppPage.Debug }
@@ -529,6 +569,12 @@ class MainActivity : ComponentActivity() {
                             autoStartOnRequest = it
                             prefs.edit().putBoolean(KEY_AUTO_START_ON_REQUEST, it).apply()
                         },
+                        respondToStartRequest = respondToStartRequest,
+                        onRespondToStartRequestChange = {
+                            respondToStartRequest = it
+                            blePeripheralManager.respondToStartRequest = it
+                            prefs.edit().putBoolean(KEY_RESPOND_TO_START_REQUEST, it).apply()
+                        },
                         isAutoRunning = isAutoRunning,
                         isAutoPaused = isAutoPaused,
                         autoProgress = autoProgress,
@@ -537,16 +583,23 @@ class MainActivity : ComponentActivity() {
                         autoCurrentSpeed = autoCurrentSpeed,
                         autoElapsedSec = autoElapsedSec,
                         autoTotalSec = autoTotalSec,
+                        lastCompletedJumps = lastCompletedJumps,
                         autoError = autoError,
                         onStart = { startAutoJump(sendStartPacket = true) },
                         onPauseToggle = { isAutoPaused = !isAutoPaused },
-                        onStop = { stopAutoJump() }
+                        onStop = { stopAutoJump() },
+                        onResendLast = {
+                            if (lastCompletedJumps > 0) {
+                                blePeripheralManager.notifySubscribers(buildJumpPacket(lastCompletedJumps))
+                            }
+                        }
                     )
 
                     AppPage.Debug -> DebugScreen(
                         logs = bleDebugLogs,
                         onClear = { clearDebugLogs() },
-                        onOpenCustomDialog = { showCustomDialog = true }
+                        onOpenCustomDialog = { showCustomDialog = true },
+                        onCopyText = { label, text -> copyToClipboard(label, text) }
                     )
 
                     AppPage.Settings -> SettingsScreen(
@@ -607,10 +660,10 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun PageTitle(title: String, subtitle: String? = null) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = title, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(text = title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
             if (subtitle != null) {
-                Text(text = subtitle, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(text = subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -619,9 +672,11 @@ class MainActivity : ComponentActivity() {
     private fun HomeScreen(
         latestLog: BleDebugLog?,
         isAutoRunning: Boolean,
+        lastCompletedJumps: Int,
         onSendStart: () -> Unit,
         onSend800: () -> Unit,
         onSend1600: () -> Unit,
+        onResendLast: () -> Unit,
         onOpenAuto: () -> Unit,
         onOpenDebug: () -> Unit
     ) {
@@ -638,7 +693,7 @@ class MainActivity : ComponentActivity() {
 
         HorizontalDivider()
 
-        Text(text = "快捷发送", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        SectionTitle("快捷发送")
         Button(onClick = onSendStart, modifier = Modifier.fillMaxWidth()) {
             Text("发送开始包")
         }
@@ -650,12 +705,19 @@ class MainActivity : ComponentActivity() {
                 Text("发送 1600 下")
             }
         }
+        Button(
+            onClick = onResendLast,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = lastCompletedJumps > 0
+        ) {
+            Text(if (lastCompletedJumps > 0) "重发最后结果（$lastCompletedJumps 下）" else "暂无可重发结果")
+        }
 
         HorizontalDivider()
 
-        Text(text = "最近事件", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        SectionTitle("最近事件")
         if (latestLog == null) {
-            Text(text = "暂无收发记录", color = Color.Gray, fontSize = 13.sp)
+            MutedText("暂无收发记录")
         } else {
             DebugLogItem(latestLog)
         }
@@ -672,11 +734,37 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun StatusPill(text: String) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.primary
+        ) {
+            Text(
+                text = text,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+
+    @Composable
+    private fun SectionTitle(text: String) {
         Text(
             text = text,
-            color = MaterialTheme.colorScheme.primary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+
+    @Composable
+    private fun MutedText(text: String, modifier: Modifier = Modifier, fontSize: TextUnit = 13.sp) {
+        Text(
+            text = text,
+            modifier = modifier,
+            fontSize = fontSize,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 
@@ -698,6 +786,8 @@ class MainActivity : ComponentActivity() {
         onKeepScreenOnChange: (Boolean) -> Unit,
         autoStartOnRequest: Boolean,
         onAutoStartOnRequestChange: (Boolean) -> Unit,
+        respondToStartRequest: Boolean,
+        onRespondToStartRequestChange: (Boolean) -> Unit,
         isAutoRunning: Boolean,
         isAutoPaused: Boolean,
         autoProgress: Int,
@@ -706,10 +796,12 @@ class MainActivity : ComponentActivity() {
         autoCurrentSpeed: Double,
         autoElapsedSec: Long,
         autoTotalSec: Long,
+        lastCompletedJumps: Int,
         autoError: String,
         onStart: () -> Unit,
         onPauseToggle: () -> Unit,
-        onStop: () -> Unit
+        onStop: () -> Unit,
+        onResendLast: () -> Unit
     ) {
         PageTitle(title = "自动跳绳", subtitle = "按时间或按速度生成连续跳绳数据包。")
 
@@ -789,10 +881,27 @@ class MainActivity : ComponentActivity() {
             onCheckedChange = onKeepScreenOnChange
         )
         ToggleRow(
+            text = "收到客户端开始请求后回发开始包",
+            checked = respondToStartRequest,
+            enabled = true,
+            onCheckedChange = onRespondToStartRequestChange
+        )
+        ToggleRow(
             text = "收到客户端开始请求后自动跳绳",
             checked = autoStartOnRequest,
             enabled = true,
             onCheckedChange = onAutoStartOnRequestChange
+        )
+
+        AutoPreview(
+            targetJumpsStr = targetJumpsStr,
+            targetTimeStr = targetTimeStr,
+            targetSpeedStr = targetSpeedStr,
+            autoMode = autoMode,
+            randomEnabled = randomEnabled,
+            keepScreenOnEnabled = keepScreenOnEnabled,
+            autoStartOnRequest = autoStartOnRequest,
+            respondToStartRequest = respondToStartRequest
         )
 
         if (autoError.isNotEmpty()) {
@@ -801,7 +910,14 @@ class MainActivity : ComponentActivity() {
 
         if (!isAutoRunning) {
             Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
-                Text("开始自动跳绳")
+                Text(if (lastCompletedJumps > 0) "再来一次" else "开始自动跳绳")
+            }
+            Button(
+                onClick = onResendLast,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = lastCompletedJumps > 0
+            ) {
+                Text(if (lastCompletedJumps > 0) "重发最后结果（$lastCompletedJumps 下）" else "暂无可重发结果")
             }
         } else {
             AutoRunStatus(
@@ -815,6 +931,57 @@ class MainActivity : ComponentActivity() {
                 autoTotalSec = autoTotalSec,
                 onPauseToggle = onPauseToggle,
                 onStop = onStop
+            )
+        }
+    }
+
+    @Composable
+    private fun AutoPreview(
+        targetJumpsStr: String,
+        targetTimeStr: String,
+        targetSpeedStr: String,
+        autoMode: String,
+        randomEnabled: Boolean,
+        keepScreenOnEnabled: Boolean,
+        autoStartOnRequest: Boolean,
+        respondToStartRequest: Boolean
+    ) {
+        val target = targetJumpsStr.toIntOrNull()
+        val timeSec = targetTimeStr.toLongOrNull()
+        val speed = targetSpeedStr.toIntOrNull()
+        val randomText = if (randomEnabled) "目标 + 0~$RANDOM_JUMP_MAX 下" else "不增加"
+        val preview = when {
+            target == null || target <= 0 -> "请输入有效目标跳数"
+            autoMode == AUTO_MODE_TIME && (timeSec == null || timeSec <= 0L) -> "请输入有效目标时间"
+            autoMode == AUTO_MODE_SPEED && (speed == null || speed <= 0) -> "请输入有效平均速度"
+            autoMode == AUTO_MODE_TIME -> {
+                val avg = target.toDouble() / timeSec!! * 60.0
+                "预计用时 ${formatTime(timeSec)}，平均 ${avg.roundToInt()} 次/分钟"
+            }
+            else -> {
+                val seconds = ceil(target.toDouble() / speed!!.toDouble() * 60.0).toLong().coerceAtLeast(1L)
+                "预计用时 ${formatTime(seconds)}，平均 $speed 次/分钟"
+            }
+        }
+
+        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(text = "启动预览", fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            MutedText(preview)
+            MutedText("随机：$randomText")
+            Text(
+                text = "开始请求回包：${if (respondToStartRequest) "回发开始包" else "不回发"}",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "开始请求自动跳绳：${if (autoStartOnRequest) "开启" else "关闭"}",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "防熄屏：${if (keepScreenOnEnabled) "自动运行时开启" else "关闭"}",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -854,13 +1021,13 @@ class MainActivity : ComponentActivity() {
         Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(text = "已完成：$autoProgress / $autoTotal 下", fontSize = 15.sp, fontWeight = FontWeight.Medium)
             if (randomEnabled) {
-                Text(text = "本次随机增加：$autoRandomAdded 下", fontSize = 14.sp, color = Color.Gray)
+                Text(text = "本次随机增加：$autoRandomAdded 下", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(text = "当前速度：${autoCurrentSpeed.roundToInt()} 次/分钟", fontSize = 14.sp, color = Color.Gray)
+            Text(text = "当前速度：${autoCurrentSpeed.roundToInt()} 次/分钟", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
                 text = "用时：${formatTime(autoElapsedSec)}，剩余：${formatTime((autoTotalSec - autoElapsedSec).coerceAtLeast(0L))}",
                 fontSize = 14.sp,
-                color = Color.Gray
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(4.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -878,44 +1045,70 @@ class MainActivity : ComponentActivity() {
     private fun DebugScreen(
         logs: List<BleDebugLog>,
         onClear: () -> Unit,
-        onOpenCustomDialog: () -> Unit
+        onOpenCustomDialog: () -> Unit,
+        onCopyText: (String, String) -> Unit
     ) {
+        var filter by remember { mutableStateOf("ALL") }
+        val filteredLogs = if (filter == "ALL") logs else logs.filter { it.direction == filter }
+
         PageTitle(title = "BLE 调试", subtitle = "查看收发包、协议备注和客户端写入。")
         Text(
             text = "广播：${if (blePeripheralManager.isAdvertising()) "运行中" else "未运行"}，订阅设备：${blePeripheralManager.subscriberCount()}",
             fontSize = 13.sp,
-            color = Color.Gray
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Button(onClick = onOpenCustomDialog, modifier = Modifier.fillMaxWidth()) {
             Text("发送自定义 Hex")
         }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("ALL", "TX", "RX", "EVT", "ERR").forEach { item ->
+                Button(onClick = { filter = item }, modifier = Modifier.weight(1f)) {
+                    Text(if (filter == item) "✓ $item" else item, fontSize = 11.sp)
+                }
+            }
+        }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(
+                onClick = {
+                    val text = filteredLogs.joinToString("\n") { log ->
+                        buildString {
+                            append("${log.time} [${log.direction}] ${log.title}")
+                            if (log.payload.isNotBlank()) append("\n${log.payload}")
+                            if (log.note.isNotBlank()) append("\n备注：${log.note}")
+                        }
+                    }
+                    onCopyText("BLE 调试日志", text)
+                },
+                enabled = filteredLogs.isNotEmpty()
+            ) {
+                Text("复制当前日志")
+            }
             TextButton(onClick = onClear) {
                 Text("清空日志")
             }
         }
-        DebugLogList(logs = logs)
+        DebugLogList(logs = filteredLogs, onCopyText = onCopyText)
     }
 
     @Composable
-    private fun DebugLogList(logs: List<BleDebugLog>) {
+    private fun DebugLogList(logs: List<BleDebugLog>, onCopyText: (String, String) -> Unit) {
         if (logs.isEmpty()) {
-            Text(text = "暂无收发记录", fontSize = 13.sp, color = Color.Gray)
+            MutedText("暂无收发记录")
             return
         }
 
         Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             logs.take(20).forEach { log ->
-                DebugLogItem(log)
+                DebugLogItem(log, onCopyText)
             }
             if (logs.size > 20) {
-                Text(text = "仅显示最近 20 条，内存中保留最近 50 条", fontSize = 11.sp, color = Color.Gray)
+                MutedText("仅显示最近 20 条，内存中保留最近 50 条", fontSize = 11.sp)
             }
         }
     }
 
     @Composable
-    private fun DebugLogItem(log: BleDebugLog) {
+    private fun DebugLogItem(log: BleDebugLog, onCopyText: ((String, String) -> Unit)? = null) {
         Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 text = "${log.time} [${log.direction}] ${log.title}",
@@ -923,7 +1116,12 @@ class MainActivity : ComponentActivity() {
                 fontWeight = FontWeight.Medium
             )
             if (log.payload.isNotBlank()) {
-                Text(text = log.payload, fontSize = 11.sp, color = Color.Gray)
+                Text(text = log.payload, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (onCopyText != null) {
+                    TextButton(onClick = { onCopyText("BLE Hex", log.payload) }) {
+                        Text("复制 Hex")
+                    }
+                }
             }
             if (log.note.isNotBlank()) {
                 Text(text = "备注：${log.note}", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
@@ -939,7 +1137,7 @@ class MainActivity : ComponentActivity() {
         Text(
             text = "若小程序扫描不到设备，请检查是否给予 Fake Loop 所需权限，或在系统设置里修改设备名称。",
             fontSize = 13.sp,
-            color = Color.Gray
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(text = "版本：1.1.0 (3)", fontSize = 14.sp)
         Button(onClick = onShowDisclaimer, modifier = Modifier.fillMaxWidth()) {

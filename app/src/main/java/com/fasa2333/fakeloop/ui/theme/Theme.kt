@@ -1,51 +1,52 @@
 package com.fasa2333.fakeloop.ui.theme
 
-import android.app.Activity
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
+    primary = LoopGreenDark,
+    secondary = LoopMintDark,
+    tertiary = LoopAmberDark,
+    background = LoopBackgroundDark,
+    surface = LoopSurfaceDark,
+    surfaceVariant = LoopSurfaceVariantDark,
+    onPrimary = Color(0xFF00382F),
+    onSecondary = Color(0xFF0D352E),
+    onTertiary = Color(0xFF402D00),
+    onBackground = LoopTextDark,
+    onSurface = LoopTextDark,
+    onSurfaceVariant = Color(0xFFC4CCC7),
+    outline = LoopOutlineDark
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
+    primary = LoopGreen,
+    secondary = LoopMint,
+    tertiary = LoopAmber,
+    background = LoopBackground,
+    surface = LoopSurface,
+    surfaceVariant = LoopSurfaceVariant,
     onPrimary = Color.White,
     onSecondary = Color.White,
     onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+    onBackground = LoopText,
+    onSurface = LoopText,
+    onSurfaceVariant = Color(0xFF404944),
+    outline = LoopOutline
 )
 
 @Composable
 fun FakeLoopTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
+        dynamicColor -> if (darkTheme) DarkColorScheme else LightColorScheme
         darkTheme -> DarkColorScheme
         else -> LightColorScheme
     }

@@ -30,6 +30,7 @@ class BlePeripheralManager(private val context: Context) {
     private val subscribedDevices = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
     var debugListener: ((direction: String, title: String, payload: String, note: String) -> Unit)? = null
     var startRequestListener: (() -> Unit)? = null
+    var respondToStartRequest: Boolean = true
 
     fun isAdvertising(): Boolean = advertisingActive
     fun subscriberCount(): Int = subscribedDevices.size
@@ -241,7 +242,11 @@ class BlePeripheralManager(private val context: Context) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
             if (characteristic.uuid == CHAR_RW_UUID && value.contentEqualsSafe(START_REQUEST)) {
-                notifySubscribers(START_RESPONSE, "收到客户端开始请求，自动回发开始包")
+                if (respondToStartRequest) {
+                    notifySubscribers(START_RESPONSE, "收到客户端开始请求，自动回发开始包")
+                } else {
+                    debugListener?.invoke("EVT", "Start response skipped", "", "收到客户端开始请求，按设置不回发开始包")
+                }
                 startRequestListener?.invoke()
             }
         }
@@ -296,7 +301,11 @@ class BlePeripheralManager(private val context: Context) {
 
     private fun parseIncomingWriteNote(characteristicUuid: UUID, value: ByteArray?): String {
         if (characteristicUuid == CHAR_RW_UUID && value.contentEqualsSafe(START_REQUEST)) {
-            return "客户端开始请求；已自动回发开始包"
+            return if (respondToStartRequest) {
+                "客户端开始请求；将按设置回发开始包"
+            } else {
+                "客户端开始请求；按设置不回发开始包"
+            }
         }
         return when {
             value == null -> ""
