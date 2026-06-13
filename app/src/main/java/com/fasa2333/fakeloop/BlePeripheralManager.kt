@@ -24,10 +24,14 @@ class BlePeripheralManager(private val context: Context) {
     private val SERVICE_UUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
     private val CHAR_NOTIFY_UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
     private val CHAR_RW_UUID = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
+    private val START_REQUEST = hexStringToByteArray("6F0101000071")
+    private val START_RESPONSE = hexStringToByteArray("6F0201000072")
 
     private val subscribedDevices = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
+    var debugListener: ((direction: String, title: String, payload: String, note: String) -> Unit)? = null
 
     fun isAdvertising(): Boolean = advertisingActive
+    fun subscriberCount(): Int = subscribedDevices.size
 
     fun isPeripheralSupported(): Boolean {
         return bluetoothAdapter?.isMultipleAdvertisementSupported == true && bluetoothAdapter?.isEnabled == true
@@ -184,6 +188,8 @@ class BlePeripheralManager(private val context: Context) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 subscribedDevices.remove(device)
             }
+            val state = if (newState == BluetoothProfile.STATE_CONNECTED) "connected" else "disconnected"
+            debugListener?.invoke("EVT", "GATT $state ${device.address}", "status=$status", "")
         }
 
         @SuppressLint("MissingPermission")
@@ -194,9 +200,11 @@ class BlePeripheralManager(private val context: Context) {
                 if (enabled) {
                     subscribedDevices.add(device)
                     Log.i(TAG, "Device subscribed for notifications: ${device.address}")
+                    debugListener?.invoke("RX", "Subscribe ${device.address}", value.toHexString(), "订阅通知特征")
                 } else {
                     subscribedDevices.remove(device)
                     Log.i(TAG, "Device unsubscribed for notifications: ${device.address}")
+                    debugListener?.invoke("RX", "Unsubscribe ${device.address}", value.toHexString(), "取消订阅通知特征")
                 }
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
@@ -213,6 +221,7 @@ class BlePeripheralManager(private val context: Context) {
             super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
             if (device == null || characteristic == null) return
             val value = characteristic.value ?: byteArrayOf(0x00)
+            debugListener?.invoke("RX", "Read ${characteristic.uuid.shortUuid()} from ${device.address}", "", "客户端读取特征")
             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, value)
         }
 
@@ -221,6 +230,8 @@ class BlePeripheralManager(private val context: Context) {
             super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
             if (device == null || characteristic == null) return
             Log.i(TAG, "Write to characteristic ${characteristic.uuid} from ${device.address}, value=${value?.joinToString(",")}")
+            val note = parseIncomingWriteNote(characteristic.uuid, value)
+            debugListener?.invoke("RX", "Write ${characteristic.uuid.shortUuid()} from ${device.address}", value.toHexString(), note)
             // Store the value in the characteristic
             if (value != null) {
                 characteristic.value = value
@@ -228,18 +239,29 @@ class BlePeripheralManager(private val context: Context) {
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
+            if (characteristic.uuid == CHAR_RW_UUID && value.contentEqualsSafe(START_REQUEST)) {
+                notifySubscribers(START_RESPONSE, "收到客户端开始请求，自动回发开始包")
+            }
         }
     }
 
     @SuppressLint("MissingPermission")
     fun notifySubscribers(data: ByteArray) {
+        notifySubscribers(data, parseOutgoingNote(data))
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun notifySubscribers(data: ByteArray, note: String) {
+        debugListener?.invoke("TX", "Notify FFF1 to ${subscribedDevices.size} device(s)", data.toHexString(), note)
         val service = gattServer?.getService(SERVICE_UUID) ?: run {
             Log.e(TAG, "Service not found when notifying")
+            debugListener?.invoke("ERR", "Notify failed", "Service not found", "")
             return
         }
         val char = service.getCharacteristic(CHAR_NOTIFY_UUID)
         if (char == null) {
             Log.e(TAG, "Notify characteristic not found")
+            debugListener?.invoke("ERR", "Notify failed", "Characteristic not found", "")
             return
         }
         char.value = data
@@ -247,6 +269,7 @@ class BlePeripheralManager(private val context: Context) {
         for (device in devicesCopy) {
             val ok = gattServer?.notifyCharacteristicChanged(device, char, false) ?: false
             Log.i(TAG, "Notified ${device.address} ok=$ok")
+            debugListener?.invoke(if (ok) "EVT" else "ERR", "Notify result ${device.address}", "ok=$ok", "")
         }
     }
 
@@ -259,5 +282,49 @@ class BlePeripheralManager(private val context: Context) {
             i += 2
         }
         return data
+    }
+
+    private fun ByteArray?.toHexString(): String {
+        return this?.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }.orEmpty()
+    }
+
+    private fun ByteArray?.contentEqualsSafe(other: ByteArray): Boolean {
+        return this?.contentEquals(other) == true
+    }
+
+    private fun parseIncomingWriteNote(characteristicUuid: UUID, value: ByteArray?): String {
+        if (characteristicUuid == CHAR_RW_UUID && value.contentEqualsSafe(START_REQUEST)) {
+            return "客户端开始请求；已自动回发开始包"
+        }
+        return when {
+            value == null -> ""
+            value.isChecksumValid() -> "checksum 通过"
+            else -> ""
+        }
+    }
+
+    private fun parseOutgoingNote(value: ByteArray): String {
+        return when {
+            value.contentEquals(START_RESPONSE) -> "开始响应包"
+            value.size == 16 && value[0] == 0x6F.toByte() && value[1] == 0x04.toByte() && value[2] == 0x0B.toByte() -> {
+                val raw = ((value[6].toInt() and 0xFF) shl 8) or (value[7].toInt() and 0xFF)
+                "跳绳数据包：${raw / 10} 下，checksum ${if (value.isChecksumValid()) "通过" else "失败"}"
+            }
+            value.isChecksumValid() -> "checksum 通过"
+            else -> ""
+        }
+    }
+
+    private fun ByteArray.isChecksumValid(): Boolean {
+        if (size < 2) return false
+        var sum = 0
+        for (i in 0 until lastIndex) {
+            sum += this[i].toInt() and 0xFF
+        }
+        return (sum and 0xFF) == (last().toInt() and 0xFF)
+    }
+
+    private fun UUID.shortUuid(): String {
+        return toString().substring(4, 8).uppercase(Locale.US)
     }
 }

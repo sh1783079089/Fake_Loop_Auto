@@ -38,6 +38,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,12 +58,25 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.roundToInt
+
+data class BleDebugLog(
+    val time: String,
+    val direction: String,
+    val title: String,
+    val payload: String,
+    val note: String
+)
 
 class MainActivity : ComponentActivity() {
     private lateinit var blePeripheralManager: BlePeripheralManager
     private lateinit var prefs: SharedPreferences
+    private val bleDebugLogs = mutableStateListOf<BleDebugLog>()
+    private val debugTimeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     private var autoPeripheralStarted: Boolean = false
     private var pendingStartAfterPermission: Boolean = false
@@ -121,6 +135,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         blePeripheralManager = BlePeripheralManager(this)
+        blePeripheralManager.debugListener = { direction, title, payload, note ->
+            runOnUiThread {
+                addDebugLog(direction, title, payload, note)
+            }
+        }
         prefs = getPreferences(Context.MODE_PRIVATE)
         ensureNameAndStartIfAllowed()
 
@@ -131,6 +150,26 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun addDebugLog(direction: String, title: String, payload: String, note: String) {
+        bleDebugLogs.add(
+            0,
+            BleDebugLog(
+                time = debugTimeFormat.format(Date()),
+                direction = direction,
+                title = title,
+                payload = payload,
+                note = note
+            )
+        )
+        while (bleDebugLogs.size > 50) {
+            bleDebugLogs.removeLast()
+        }
+    }
+
+    private fun clearDebugLogs() {
+        bleDebugLogs.clear()
     }
 
     private fun requestNeededPermissions() {
@@ -614,6 +653,77 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text("停止")
                         }
+                    }
+                }
+            }
+
+            HorizontalDivider()
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "BLE 调试",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "广播：${if (blePeripheralManager.isAdvertising()) "运行中" else "未运行"}，订阅设备：${blePeripheralManager.subscriberCount()}",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                }
+                TextButton(onClick = { clearDebugLogs() }) {
+                    Text("清空")
+                }
+            }
+
+            if (bleDebugLogs.isEmpty()) {
+                Text(
+                    text = "暂无收发记录",
+                    fontSize = 13.sp,
+                    color = Color.Gray
+                )
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    bleDebugLogs.take(12).forEach { log ->
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "${log.time} [${log.direction}] ${log.title}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            if (log.payload.isNotBlank()) {
+                                Text(
+                                    text = log.payload,
+                                    fontSize = 11.sp,
+                                    color = Color.Gray
+                                )
+                            }
+                            if (log.note.isNotBlank()) {
+                                Text(
+                                    text = "备注：${log.note}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                    if (bleDebugLogs.size > 12) {
+                        Text(
+                            text = "仅显示最近 12 条，内存中保留最近 50 条",
+                            fontSize = 11.sp,
+                            color = Color.Gray
+                        )
                     }
                 }
             }
