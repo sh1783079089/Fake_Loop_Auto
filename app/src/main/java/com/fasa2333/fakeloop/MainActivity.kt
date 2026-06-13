@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -56,6 +57,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -84,12 +86,18 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val KEY_TARGET_JUMPS = "targetJumps"
         private const val KEY_TARGET_TIME = "targetTime"
+        private const val KEY_TARGET_SPEED = "targetSpeed"
+        private const val KEY_AUTO_MODE = "autoMode"
         private const val KEY_DECEL_RATE = "decelRate"
         private const val KEY_RANDOM_ENABLED = "randomEnabled"
+        private const val KEY_KEEP_SCREEN_ON = "keepScreenOn"
         private const val KEY_LAST_USED_TARGET_JUMPS = "lastUsedTargetJumps"
         private const val DEFAULT_TARGET_JUMPS = 800
         private const val DEFAULT_TARGET_TIME = 400
+        private const val DEFAULT_TARGET_SPEED = 120
         private const val DEFAULT_DECEL_RATE = "0.2"
+        private const val AUTO_MODE_TIME = "time"
+        private const val AUTO_MODE_SPEED = "speed"
         private const val MAX_PACKET_JUMPS = 6553
         private const val RANDOM_JUMP_MAX = 50
     }
@@ -185,6 +193,14 @@ class MainActivity : ComponentActivity() {
         return "%02d:%02d".format(minutes, restSeconds)
     }
 
+    private fun setKeepScreenOn(enabled: Boolean) {
+        if (enabled) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun MainContent(modifier: Modifier = Modifier) {
@@ -199,16 +215,26 @@ class MainActivity : ComponentActivity() {
         var targetTimeStr by remember {
             mutableStateOf(prefs.getInt(KEY_TARGET_TIME, DEFAULT_TARGET_TIME).toString())
         }
+        var targetSpeedStr by remember {
+            mutableStateOf(prefs.getInt(KEY_TARGET_SPEED, DEFAULT_TARGET_SPEED).toString())
+        }
+        var autoMode by remember {
+            mutableStateOf(prefs.getString(KEY_AUTO_MODE, AUTO_MODE_TIME) ?: AUTO_MODE_TIME)
+        }
         var decelRateStr by remember {
             mutableStateOf(prefs.getString(KEY_DECEL_RATE, DEFAULT_DECEL_RATE) ?: DEFAULT_DECEL_RATE)
         }
         var randomEnabled by remember {
             mutableStateOf(prefs.getBoolean(KEY_RANDOM_ENABLED, true))
         }
+        var keepScreenOnEnabled by remember {
+            mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_ON, true))
+        }
         var isAutoRunning by remember { mutableStateOf(false) }
         var isAutoPaused by remember { mutableStateOf(false) }
         var autoProgress by remember { mutableStateOf(0) }
         var autoTotal by remember { mutableStateOf(0) }
+        var autoRandomAdded by remember { mutableStateOf(0) }
         var autoCurrentSpeed by remember { mutableStateOf(0.0) }
         var autoElapsedSec by remember { mutableStateOf(0L) }
         var autoTotalSec by remember { mutableStateOf(0L) }
@@ -291,7 +317,12 @@ class MainActivity : ComponentActivity() {
             )
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !isAutoRunning) {
+                        randomEnabled = !randomEnabled
+                        prefs.edit().putBoolean(KEY_RANDOM_ENABLED, randomEnabled).apply()
+                    },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -305,6 +336,30 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     enabled = !isAutoRunning
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        keepScreenOnEnabled = !keepScreenOnEnabled
+                        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, keepScreenOnEnabled).apply()
+                        if (!keepScreenOnEnabled || isAutoRunning) {
+                            setKeepScreenOn(keepScreenOnEnabled && isAutoRunning)
+                        }
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "自动跳绳时保持屏幕常亮")
+                Switch(
+                    checked = keepScreenOnEnabled,
+                    onCheckedChange = { enabled ->
+                        keepScreenOnEnabled = enabled
+                        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, enabled).apply()
+                        setKeepScreenOn(enabled && isAutoRunning)
+                    }
                 )
             }
 
@@ -324,21 +379,71 @@ class MainActivity : ComponentActivity() {
                 singleLine = true
             )
 
-            OutlinedTextField(
-                value = targetTimeStr,
-                onValueChange = { value ->
-                    if (!isAutoRunning) {
-                        targetTimeStr = value.filter { it.isDigit() }
-                        autoError = ""
-                    }
-                },
-                label = { Text("目标时间") },
-                suffix = { Text("秒") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isAutoRunning,
-                singleLine = true
-            )
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        if (!isAutoRunning) {
+                            autoMode = AUTO_MODE_TIME
+                            prefs.edit().putString(KEY_AUTO_MODE, autoMode).apply()
+                            autoError = ""
+                        }
+                    },
+                    enabled = !isAutoRunning || autoMode == AUTO_MODE_TIME,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (autoMode == AUTO_MODE_TIME) "✓ 按时间" else "按时间")
+                }
+                Button(
+                    onClick = {
+                        if (!isAutoRunning) {
+                            autoMode = AUTO_MODE_SPEED
+                            prefs.edit().putString(KEY_AUTO_MODE, autoMode).apply()
+                            autoError = ""
+                        }
+                    },
+                    enabled = !isAutoRunning || autoMode == AUTO_MODE_SPEED,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (autoMode == AUTO_MODE_SPEED) "✓ 按速度" else "按速度")
+                }
+            }
+
+            if (autoMode == AUTO_MODE_TIME) {
+                OutlinedTextField(
+                    value = targetTimeStr,
+                    onValueChange = { value ->
+                        if (!isAutoRunning) {
+                            targetTimeStr = value.filter { it.isDigit() }
+                            autoError = ""
+                        }
+                    },
+                    label = { Text("目标时间") },
+                    suffix = { Text("秒") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isAutoRunning,
+                    singleLine = true
+                )
+            } else {
+                OutlinedTextField(
+                    value = targetSpeedStr,
+                    onValueChange = { value ->
+                        if (!isAutoRunning) {
+                            targetSpeedStr = value.filter { it.isDigit() }
+                            autoError = ""
+                        }
+                    },
+                    label = { Text("平均速度") },
+                    suffix = { Text("次/分钟") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isAutoRunning,
+                    singleLine = true
+                )
+            }
 
             OutlinedTextField(
                 value = decelRateStr,
@@ -364,7 +469,8 @@ class MainActivity : ComponentActivity() {
                 Button(
                     onClick = {
                         val requestedTotal = targetJumpsStr.toIntOrNull()
-                        val totalSec = targetTimeStr.toLongOrNull()
+                        val requestedTimeSec = targetTimeStr.toLongOrNull()
+                        val requestedSpeed = targetSpeedStr.toIntOrNull()
                         val decel = decelRateStr.toDoubleOrNull()?.coerceIn(0.0, 1.0)
 
                         val maxRequestedTotal = MAX_PACKET_JUMPS - if (randomEnabled) RANDOM_JUMP_MAX else 0
@@ -372,25 +478,46 @@ class MainActivity : ComponentActivity() {
                             autoError = "目标跳数需为 1~$maxRequestedTotal 的整数"
                             return@Button
                         }
-                        if (totalSec == null || totalSec <= 0 || totalSec > 60000) {
-                            autoError = "目标时间需为 1~60000 秒"
-                            return@Button
-                        }
                         if (decel == null) {
                             autoError = "减速率需为 0~1 之间的小数"
                             return@Button
                         }
 
-                        val total = requestedTotal + if (randomEnabled) (0..RANDOM_JUMP_MAX).random() else 0
-                        val avgJpm = total.toDouble() / totalSec * 60.0
+                        val randomAdded = if (randomEnabled) (0..RANDOM_JUMP_MAX).random() else 0
+                        val total = requestedTotal + randomAdded
+                        val avgJpm: Double
+                        val totalSec: Long
+                        if (autoMode == AUTO_MODE_TIME) {
+                            if (requestedTimeSec == null || requestedTimeSec <= 0 || requestedTimeSec > 60000) {
+                                autoError = "目标时间需为 1~60000 秒"
+                                return@Button
+                            }
+                            totalSec = requestedTimeSec
+                            avgJpm = total.toDouble() / totalSec * 60.0
+                        } else {
+                            if (requestedSpeed == null || requestedSpeed <= 0 || requestedSpeed > 60000) {
+                                autoError = "平均速度需为 1~60000 次/分钟"
+                                return@Button
+                            }
+                            avgJpm = requestedSpeed.toDouble()
+                            totalSec = ceil(total.toDouble() / avgJpm * 60.0).toLong().coerceAtLeast(1L)
+                            if (totalSec > 60000) {
+                                autoError = "按当前速度预计用时超过 60000 秒"
+                                return@Button
+                            }
+                        }
                         prefs.edit()
                             .putInt(KEY_TARGET_JUMPS, requestedTotal)
-                            .putInt(KEY_TARGET_TIME, totalSec.toInt())
+                            .putInt(KEY_TARGET_TIME, targetTimeStr.toIntOrNull() ?: DEFAULT_TARGET_TIME)
+                            .putInt(KEY_TARGET_SPEED, targetSpeedStr.toIntOrNull() ?: DEFAULT_TARGET_SPEED)
+                            .putString(KEY_AUTO_MODE, autoMode)
                             .putString(KEY_DECEL_RATE, decelRateStr)
                             .putBoolean(KEY_RANDOM_ENABLED, randomEnabled)
+                            .putBoolean(KEY_KEEP_SCREEN_ON, keepScreenOnEnabled)
                             .apply()
 
                         autoTotal = total
+                        autoRandomAdded = randomAdded
                         autoTotalSec = totalSec
                         autoProgress = 0
                         autoElapsedSec = 0L
@@ -398,6 +525,7 @@ class MainActivity : ComponentActivity() {
                         autoError = ""
                         isAutoRunning = true
                         isAutoPaused = false
+                        setKeepScreenOn(keepScreenOnEnabled)
 
                         autoJob = autoScope.launch {
                             blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
@@ -430,6 +558,7 @@ class MainActivity : ComponentActivity() {
                             }
                             isAutoRunning = false
                             isAutoPaused = false
+                            setKeepScreenOn(false)
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -446,6 +575,13 @@ class MainActivity : ComponentActivity() {
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium
                     )
+                    if (randomEnabled) {
+                        Text(
+                            text = "本次随机增加：$autoRandomAdded 下",
+                            fontSize = 14.sp,
+                            color = Color.Gray
+                        )
+                    }
                     Text(
                         text = "当前速度：${autoCurrentSpeed.roundToInt()} 次/分钟",
                         fontSize = 14.sp,
@@ -472,6 +608,7 @@ class MainActivity : ComponentActivity() {
                                 autoJob?.cancel()
                                 isAutoRunning = false
                                 isAutoPaused = false
+                                setKeepScreenOn(false)
                             },
                             modifier = Modifier.weight(1f)
                         ) {
@@ -584,6 +721,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onDestroy() {
+        setKeepScreenOn(false)
+        super.onDestroy()
     }
 
     @SuppressLint("MissingPermission")
