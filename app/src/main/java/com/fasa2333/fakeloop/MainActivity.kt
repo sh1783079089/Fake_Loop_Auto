@@ -29,7 +29,15 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -37,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +81,13 @@ data class BleDebugLog(
     val note: String
 )
 
+private enum class AppPage(val label: String) {
+    Home("首页"),
+    Auto("自动"),
+    Debug("调试"),
+    Settings("设置")
+}
+
 class MainActivity : ComponentActivity() {
     private lateinit var blePeripheralManager: BlePeripheralManager
     private lateinit var prefs: SharedPreferences
@@ -105,6 +121,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_DECEL_RATE = "decelRate"
         private const val KEY_RANDOM_ENABLED = "randomEnabled"
         private const val KEY_KEEP_SCREEN_ON = "keepScreenOn"
+        private const val KEY_AUTO_START_ON_REQUEST = "autoStartOnRequest"
         private const val KEY_LAST_USED_TARGET_JUMPS = "lastUsedTargetJumps"
         private const val DEFAULT_TARGET_JUMPS = 800
         private const val DEFAULT_TARGET_TIME = 400
@@ -145,9 +162,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             FakeLoopTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    MainContent(modifier = Modifier.padding(innerPadding))
-                }
+                MainContent()
             }
         }
     }
@@ -242,7 +257,8 @@ class MainActivity : ComponentActivity() {
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    fun MainContent(modifier: Modifier = Modifier) {
+    fun MainContent() {
+        var currentPage by remember { mutableStateOf(AppPage.Home) }
         var showCustomDialog by remember { mutableStateOf(false) }
         var customHex by remember { mutableStateOf("") }
         var customError by remember { mutableStateOf("") }
@@ -269,6 +285,9 @@ class MainActivity : ComponentActivity() {
         var keepScreenOnEnabled by remember {
             mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_ON, true))
         }
+        var autoStartOnRequest by remember {
+            mutableStateOf(prefs.getBoolean(KEY_AUTO_START_ON_REQUEST, false))
+        }
         var isAutoRunning by remember { mutableStateOf(false) }
         var isAutoPaused by remember { mutableStateOf(false) }
         var autoProgress by remember { mutableStateOf(0) }
@@ -281,556 +300,719 @@ class MainActivity : ComponentActivity() {
         val autoScope = rememberCoroutineScope()
         var autoJob by remember { mutableStateOf<Job?>(null) }
 
-        Column(
-            modifier = modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Fake Loop",
-                fontSize = 36.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.fillMaxWidth(),
-            )
+        fun stopAutoJump() {
+            autoJob?.cancel()
+            isAutoRunning = false
+            isAutoPaused = false
+            setKeepScreenOn(false)
+        }
 
-            Text(
-                text = "若小程序扫描不到设备，请检查是否给予 Fake Loop 所需的权限，或在系统设置里修改设备名称为 \"$targetBtName\"。",
-                fontSize = 12.sp,
-                color = Color.Gray,
-                modifier = Modifier.fillMaxWidth()
-            )
+        fun startAutoJump(sendStartPacket: Boolean = true) {
+            val requestedTotal = targetJumpsStr.toIntOrNull()
+            val requestedTimeSec = targetTimeStr.toLongOrNull()
+            val requestedSpeed = targetSpeedStr.toIntOrNull()
+            val decel = decelRateStr.toDoubleOrNull()?.coerceIn(0.0, 1.0)
 
-            Column(
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Button(
-                    onClick = {
-                        blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = "发送开始包")
+            val maxRequestedTotal = MAX_PACKET_JUMPS - if (randomEnabled) RANDOM_JUMP_MAX else 0
+            if (requestedTotal == null || requestedTotal <= 0 || requestedTotal > maxRequestedTotal) {
+                autoError = "目标跳数需为 1~$maxRequestedTotal 的整数"
+                return
+            }
+            if (decel == null) {
+                autoError = "减速率需为 0~1 之间的小数"
+                return
+            }
+
+            val randomAdded = if (randomEnabled) (0..RANDOM_JUMP_MAX).random() else 0
+            val total = requestedTotal + randomAdded
+            val avgJpm: Double
+            val totalSec: Long
+            if (autoMode == AUTO_MODE_TIME) {
+                if (requestedTimeSec == null || requestedTimeSec <= 0 || requestedTimeSec > 60000) {
+                    autoError = "目标时间需为 1~60000 秒"
+                    return
+                }
+                totalSec = requestedTimeSec
+                avgJpm = total.toDouble() / totalSec * 60.0
+            } else {
+                if (requestedSpeed == null || requestedSpeed <= 0 || requestedSpeed > 60000) {
+                    autoError = "平均速度需为 1~60000 次/分钟"
+                    return
+                }
+                avgJpm = requestedSpeed.toDouble()
+                totalSec = ceil(total.toDouble() / avgJpm * 60.0).toLong().coerceAtLeast(1L)
+                if (totalSec > 60000) {
+                    autoError = "按当前速度预计用时超过 60000 秒"
+                    return
+                }
+            }
+
+            prefs.edit()
+                .putInt(KEY_TARGET_JUMPS, requestedTotal)
+                .putInt(KEY_TARGET_TIME, targetTimeStr.toIntOrNull() ?: DEFAULT_TARGET_TIME)
+                .putInt(KEY_TARGET_SPEED, targetSpeedStr.toIntOrNull() ?: DEFAULT_TARGET_SPEED)
+                .putString(KEY_AUTO_MODE, autoMode)
+                .putString(KEY_DECEL_RATE, decelRateStr)
+                .putBoolean(KEY_RANDOM_ENABLED, randomEnabled)
+                .putBoolean(KEY_KEEP_SCREEN_ON, keepScreenOnEnabled)
+                .putBoolean(KEY_AUTO_START_ON_REQUEST, autoStartOnRequest)
+                .apply()
+
+            autoTotal = total
+            autoRandomAdded = randomAdded
+            autoTotalSec = totalSec
+            autoProgress = 0
+            autoElapsedSec = 0L
+            autoCurrentSpeed = avgJpm
+            autoError = ""
+            isAutoRunning = true
+            isAutoPaused = false
+            setKeepScreenOn(keepScreenOnEnabled)
+
+            autoJob = autoScope.launch {
+                if (sendStartPacket) {
+                    blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = {
+                var elapsed = 0L
+                var current = 0
+                while (elapsed < totalSec && current < total && isActive) {
+                    delay(1000L)
+                    if (isAutoPaused) {
+                        continue
+                    }
+
+                    elapsed++
+                    val speed = calcCurrentSpeed(elapsed, totalSec, avgJpm, decel)
+                    val increment = (speed / 60).roundToInt().coerceAtLeast(1)
+                    current = if (elapsed >= totalSec) {
+                        total
+                    } else {
+                        minOf(total, current + increment)
+                    }
+                    autoProgress = current
+                    autoCurrentSpeed = speed
+                    autoElapsedSec = elapsed
+                    blePeripheralManager.notifySubscribers(buildJumpPacket(current))
+                }
+
+                if (isActive) {
+                    blePeripheralManager.notifySubscribers(buildJumpPacket(total))
+                    prefs.edit().putInt(KEY_LAST_USED_TARGET_JUMPS, total).apply()
+                }
+                isAutoRunning = false
+                isAutoPaused = false
+                setKeepScreenOn(false)
+            }
+        }
+
+        DisposableEffect(
+            autoStartOnRequest,
+            isAutoRunning,
+            targetJumpsStr,
+            targetTimeStr,
+            targetSpeedStr,
+            autoMode,
+            decelRateStr,
+            randomEnabled,
+            keepScreenOnEnabled
+        ) {
+            blePeripheralManager.startRequestListener = {
+                runOnUiThread {
+                    if (autoStartOnRequest && !isAutoRunning) {
+                        addDebugLog("EVT", "Auto jump trigger", "", "收到客户端开始请求，已按当前设置启动自动跳绳")
+                        startAutoJump(sendStartPacket = false)
+                    } else if (autoStartOnRequest) {
+                        addDebugLog("EVT", "Auto jump trigger skipped", "", "自动跳绳已在运行，忽略本次开始请求")
+                    } else {
+                        addDebugLog("EVT", "Auto jump trigger skipped", "", "自动开始开关关闭，仅回发开始包")
+                    }
+                }
+            }
+            onDispose {
+                blePeripheralManager.startRequestListener = null
+            }
+        }
+
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            bottomBar = {
+                NavigationBar {
+                    AppPage.entries.forEach { page ->
+                        NavigationBarItem(
+                            selected = currentPage == page,
+                            onClick = { currentPage = page },
+                            icon = { NavIcon(page = page) },
+                            label = { Text(page.label) }
+                        )
+                    }
+                }
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .padding(innerPadding)
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                when (currentPage) {
+                    AppPage.Home -> HomeScreen(
+                        latestLog = bleDebugLogs.firstOrNull(),
+                        isAutoRunning = isAutoRunning,
+                        onSendStart = {
+                            blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
+                        },
+                        onSend800 = {
                             blePeripheralManager.notifySubscribers(buildJumpPacket(800))
                         },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = "发送 800 下")
-                    }
-
-                    Button(
-                        onClick = {
+                        onSend1600 = {
                             blePeripheralManager.notifySubscribers(buildJumpPacket(1600))
                         },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = "发送 1600 下")
-                    }
+                        onOpenAuto = { currentPage = AppPage.Auto },
+                        onOpenDebug = { currentPage = AppPage.Debug }
+                    )
+
+                    AppPage.Auto -> AutoScreen(
+                        targetJumpsStr = targetJumpsStr,
+                        onTargetJumpsChange = {
+                            if (!isAutoRunning) {
+                                targetJumpsStr = it.filter { char -> char.isDigit() }
+                                autoError = ""
+                            }
+                        },
+                        targetTimeStr = targetTimeStr,
+                        onTargetTimeChange = {
+                            if (!isAutoRunning) {
+                                targetTimeStr = it.filter { char -> char.isDigit() }
+                                autoError = ""
+                            }
+                        },
+                        targetSpeedStr = targetSpeedStr,
+                        onTargetSpeedChange = {
+                            if (!isAutoRunning) {
+                                targetSpeedStr = it.filter { char -> char.isDigit() }
+                                autoError = ""
+                            }
+                        },
+                        autoMode = autoMode,
+                        onAutoModeChange = {
+                            if (!isAutoRunning) {
+                                autoMode = it
+                                prefs.edit().putString(KEY_AUTO_MODE, autoMode).apply()
+                                autoError = ""
+                            }
+                        },
+                        decelRateStr = decelRateStr,
+                        onDecelRateChange = {
+                            if (!isAutoRunning) {
+                                decelRateStr = it.filter { char -> char.isDigit() || char == '.' }
+                                autoError = ""
+                            }
+                        },
+                        randomEnabled = randomEnabled,
+                        onRandomChange = {
+                            if (!isAutoRunning) {
+                                randomEnabled = it
+                                prefs.edit().putBoolean(KEY_RANDOM_ENABLED, it).apply()
+                            }
+                        },
+                        keepScreenOnEnabled = keepScreenOnEnabled,
+                        onKeepScreenOnChange = {
+                            keepScreenOnEnabled = it
+                            prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, it).apply()
+                            setKeepScreenOn(it && isAutoRunning)
+                        },
+                        autoStartOnRequest = autoStartOnRequest,
+                        onAutoStartOnRequestChange = {
+                            autoStartOnRequest = it
+                            prefs.edit().putBoolean(KEY_AUTO_START_ON_REQUEST, it).apply()
+                        },
+                        isAutoRunning = isAutoRunning,
+                        isAutoPaused = isAutoPaused,
+                        autoProgress = autoProgress,
+                        autoTotal = autoTotal,
+                        autoRandomAdded = autoRandomAdded,
+                        autoCurrentSpeed = autoCurrentSpeed,
+                        autoElapsedSec = autoElapsedSec,
+                        autoTotalSec = autoTotalSec,
+                        autoError = autoError,
+                        onStart = { startAutoJump(sendStartPacket = true) },
+                        onPauseToggle = { isAutoPaused = !isAutoPaused },
+                        onStop = { stopAutoJump() }
+                    )
+
+                    AppPage.Debug -> DebugScreen(
+                        logs = bleDebugLogs,
+                        onClear = { clearDebugLogs() },
+                        onOpenCustomDialog = { showCustomDialog = true }
+                    )
+
+                    AppPage.Settings -> SettingsScreen(
+                        onShowDisclaimer = { showDisclaimer = true }
+                    )
                 }
-
-                Button(
-                    onClick = { showCustomDialog = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = "发送自定义数据")
-                }
             }
+        }
 
-            HorizontalDivider()
-
-            Text(
-                text = "自动跳绳",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = !isAutoRunning) {
-                        randomEnabled = !randomEnabled
-                        prefs.edit().putBoolean(KEY_RANDOM_ENABLED, randomEnabled).apply()
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(text = "为目标跳数增加随机值")
-                Switch(
-                    checked = randomEnabled,
-                    onCheckedChange = { enabled ->
-                        if (!isAutoRunning) {
-                            randomEnabled = enabled
-                            prefs.edit().putBoolean(KEY_RANDOM_ENABLED, enabled).apply()
-                        }
-                    },
-                    enabled = !isAutoRunning
-                )
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        keepScreenOnEnabled = !keepScreenOnEnabled
-                        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, keepScreenOnEnabled).apply()
-                        if (!keepScreenOnEnabled || isAutoRunning) {
-                            setKeepScreenOn(keepScreenOnEnabled && isAutoRunning)
-                        }
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(text = "自动跳绳时保持屏幕常亮")
-                Switch(
-                    checked = keepScreenOnEnabled,
-                    onCheckedChange = { enabled ->
-                        keepScreenOnEnabled = enabled
-                        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, enabled).apply()
-                        setKeepScreenOn(enabled && isAutoRunning)
-                    }
-                )
-            }
-
-            OutlinedTextField(
-                value = targetJumpsStr,
-                onValueChange = { value ->
-                    if (!isAutoRunning) {
-                        targetJumpsStr = value.filter { it.isDigit() }
-                        autoError = ""
-                    }
+        if (showCustomDialog) {
+            CustomHexDialog(
+                customHex = customHex,
+                customError = customError,
+                onHexChange = {
+                    customHex = it
+                    customError = ""
                 },
-                label = { Text("目标跳数") },
-                suffix = { Text("下") },
+                onDismiss = {
+                    showCustomDialog = false
+                    customHex = ""
+                    customError = ""
+                },
+                onSend = {
+                    val hex = customHex.replace("\\s".toRegex(), "")
+                    val ok = hex.matches(Regex("^[0-9a-fA-F]+$")) && hex.length % 2 == 0
+                    if (!ok) {
+                        customError = "输入不是有效的偶数长度十六进制字符串"
+                        return@CustomHexDialog
+                    }
+                    val payload = try {
+                        hexStringToByteArray(hex)
+                    } catch (e: Exception) {
+                        customError = "Hex 转换失败"
+                        return@CustomHexDialog
+                    }
+                    blePeripheralManager.notifySubscribers(payload)
+                    showCustomDialog = false
+                    customHex = ""
+                }
+            )
+        }
+
+        if (showDisclaimer) {
+            DisclaimerDialog(onDismiss = { showDisclaimer = false })
+        }
+    }
+
+    @Composable
+    private fun NavIcon(page: AppPage) {
+        val icon = when (page) {
+            AppPage.Home -> Icons.Outlined.Home
+            AppPage.Auto -> Icons.Outlined.PlayArrow
+            AppPage.Debug -> Icons.Outlined.BugReport
+            AppPage.Settings -> Icons.Outlined.Settings
+        }
+        Icon(imageVector = icon, contentDescription = page.label)
+    }
+
+    @Composable
+    private fun PageTitle(title: String, subtitle: String? = null) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(text = title, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            if (subtitle != null) {
+                Text(text = subtitle, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+
+    @Composable
+    private fun HomeScreen(
+        latestLog: BleDebugLog?,
+        isAutoRunning: Boolean,
+        onSendStart: () -> Unit,
+        onSend800: () -> Unit,
+        onSend1600: () -> Unit,
+        onOpenAuto: () -> Unit,
+        onOpenDebug: () -> Unit
+    ) {
+        PageTitle(
+            title = "Fake Loop",
+            subtitle = "设备名 $targetBtName。运行时请保持蓝牙开启，并确认客户端已订阅通知。"
+        )
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusPill(if (blePeripheralManager.isAdvertising()) "广播中" else "未广播")
+            StatusPill("订阅 ${blePeripheralManager.subscriberCount()}")
+            StatusPill(if (isAutoRunning) "自动运行中" else "待命")
+        }
+
+        HorizontalDivider()
+
+        Text(text = "快捷发送", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Button(onClick = onSendStart, modifier = Modifier.fillMaxWidth()) {
+            Text("发送开始包")
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onSend800, modifier = Modifier.weight(1f)) {
+                Text("发送 800 下")
+            }
+            Button(onClick = onSend1600, modifier = Modifier.weight(1f)) {
+                Text("发送 1600 下")
+            }
+        }
+
+        HorizontalDivider()
+
+        Text(text = "最近事件", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        if (latestLog == null) {
+            Text(text = "暂无收发记录", color = Color.Gray, fontSize = 13.sp)
+        } else {
+            DebugLogItem(latestLog)
+        }
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onOpenAuto, modifier = Modifier.weight(1f)) {
+                Text("自动跳绳")
+            }
+            Button(onClick = onOpenDebug, modifier = Modifier.weight(1f)) {
+                Text("BLE 调试")
+            }
+        }
+    }
+
+    @Composable
+    private fun StatusPill(text: String) {
+        Text(
+            text = text,
+            color = MaterialTheme.colorScheme.primary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+
+    @Composable
+    private fun AutoScreen(
+        targetJumpsStr: String,
+        onTargetJumpsChange: (String) -> Unit,
+        targetTimeStr: String,
+        onTargetTimeChange: (String) -> Unit,
+        targetSpeedStr: String,
+        onTargetSpeedChange: (String) -> Unit,
+        autoMode: String,
+        onAutoModeChange: (String) -> Unit,
+        decelRateStr: String,
+        onDecelRateChange: (String) -> Unit,
+        randomEnabled: Boolean,
+        onRandomChange: (Boolean) -> Unit,
+        keepScreenOnEnabled: Boolean,
+        onKeepScreenOnChange: (Boolean) -> Unit,
+        autoStartOnRequest: Boolean,
+        onAutoStartOnRequestChange: (Boolean) -> Unit,
+        isAutoRunning: Boolean,
+        isAutoPaused: Boolean,
+        autoProgress: Int,
+        autoTotal: Int,
+        autoRandomAdded: Int,
+        autoCurrentSpeed: Double,
+        autoElapsedSec: Long,
+        autoTotalSec: Long,
+        autoError: String,
+        onStart: () -> Unit,
+        onPauseToggle: () -> Unit,
+        onStop: () -> Unit
+    ) {
+        PageTitle(title = "自动跳绳", subtitle = "按时间或按速度生成连续跳绳数据包。")
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { onAutoModeChange(AUTO_MODE_TIME) },
+                enabled = !isAutoRunning || autoMode == AUTO_MODE_TIME,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(if (autoMode == AUTO_MODE_TIME) "✓ 按时间" else "按时间")
+            }
+            Button(
+                onClick = { onAutoModeChange(AUTO_MODE_SPEED) },
+                enabled = !isAutoRunning || autoMode == AUTO_MODE_SPEED,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(if (autoMode == AUTO_MODE_SPEED) "✓ 按速度" else "按速度")
+            }
+        }
+
+        OutlinedTextField(
+            value = targetJumpsStr,
+            onValueChange = onTargetJumpsChange,
+            label = { Text("目标跳数") },
+            suffix = { Text("下") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isAutoRunning,
+            singleLine = true
+        )
+
+        if (autoMode == AUTO_MODE_TIME) {
+            OutlinedTextField(
+                value = targetTimeStr,
+                onValueChange = onTargetTimeChange,
+                label = { Text("目标时间") },
+                suffix = { Text("秒") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isAutoRunning,
                 singleLine = true
             )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = {
-                        if (!isAutoRunning) {
-                            autoMode = AUTO_MODE_TIME
-                            prefs.edit().putString(KEY_AUTO_MODE, autoMode).apply()
-                            autoError = ""
-                        }
-                    },
-                    enabled = !isAutoRunning || autoMode == AUTO_MODE_TIME,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(if (autoMode == AUTO_MODE_TIME) "✓ 按时间" else "按时间")
-                }
-                Button(
-                    onClick = {
-                        if (!isAutoRunning) {
-                            autoMode = AUTO_MODE_SPEED
-                            prefs.edit().putString(KEY_AUTO_MODE, autoMode).apply()
-                            autoError = ""
-                        }
-                    },
-                    enabled = !isAutoRunning || autoMode == AUTO_MODE_SPEED,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(if (autoMode == AUTO_MODE_SPEED) "✓ 按速度" else "按速度")
-                }
-            }
-
-            if (autoMode == AUTO_MODE_TIME) {
-                OutlinedTextField(
-                    value = targetTimeStr,
-                    onValueChange = { value ->
-                        if (!isAutoRunning) {
-                            targetTimeStr = value.filter { it.isDigit() }
-                            autoError = ""
-                        }
-                    },
-                    label = { Text("目标时间") },
-                    suffix = { Text("秒") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isAutoRunning,
-                    singleLine = true
-                )
-            } else {
-                OutlinedTextField(
-                    value = targetSpeedStr,
-                    onValueChange = { value ->
-                        if (!isAutoRunning) {
-                            targetSpeedStr = value.filter { it.isDigit() }
-                            autoError = ""
-                        }
-                    },
-                    label = { Text("平均速度") },
-                    suffix = { Text("次/分钟") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isAutoRunning,
-                    singleLine = true
-                )
-            }
-
+        } else {
             OutlinedTextField(
-                value = decelRateStr,
-                onValueChange = { value ->
-                    if (!isAutoRunning) {
-                        decelRateStr = value.filter { it.isDigit() || it == '.' }
-                        autoError = ""
-                    }
-                },
-                label = { Text("减速率") },
-                placeholder = { Text("0~1，0 为匀速") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                value = targetSpeedStr,
+                onValueChange = onTargetSpeedChange,
+                label = { Text("平均速度") },
+                suffix = { Text("次/分钟") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isAutoRunning,
                 singleLine = true
             )
+        }
 
-            if (autoError.isNotEmpty()) {
-                Text(text = autoError, color = Color.Red, fontSize = 14.sp)
+        OutlinedTextField(
+            value = decelRateStr,
+            onValueChange = onDecelRateChange,
+            label = { Text("减速率") },
+            placeholder = { Text("0~1，0 为匀速") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isAutoRunning,
+            singleLine = true
+        )
+
+        ToggleRow(
+            text = "为目标跳数增加随机值",
+            checked = randomEnabled,
+            enabled = !isAutoRunning,
+            onCheckedChange = onRandomChange
+        )
+        ToggleRow(
+            text = "自动跳绳时保持屏幕常亮",
+            checked = keepScreenOnEnabled,
+            enabled = true,
+            onCheckedChange = onKeepScreenOnChange
+        )
+        ToggleRow(
+            text = "收到客户端开始请求后自动跳绳",
+            checked = autoStartOnRequest,
+            enabled = true,
+            onCheckedChange = onAutoStartOnRequestChange
+        )
+
+        if (autoError.isNotEmpty()) {
+            Text(text = autoError, color = Color.Red, fontSize = 14.sp)
+        }
+
+        if (!isAutoRunning) {
+            Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
+                Text("开始自动跳绳")
             }
+        } else {
+            AutoRunStatus(
+                isAutoPaused = isAutoPaused,
+                autoProgress = autoProgress,
+                autoTotal = autoTotal,
+                randomEnabled = randomEnabled,
+                autoRandomAdded = autoRandomAdded,
+                autoCurrentSpeed = autoCurrentSpeed,
+                autoElapsedSec = autoElapsedSec,
+                autoTotalSec = autoTotalSec,
+                onPauseToggle = onPauseToggle,
+                onStop = onStop
+            )
+        }
+    }
 
-            if (!isAutoRunning) {
-                Button(
-                    onClick = {
-                        val requestedTotal = targetJumpsStr.toIntOrNull()
-                        val requestedTimeSec = targetTimeStr.toLongOrNull()
-                        val requestedSpeed = targetSpeedStr.toIntOrNull()
-                        val decel = decelRateStr.toDoubleOrNull()?.coerceIn(0.0, 1.0)
+    @Composable
+    private fun ToggleRow(
+        text: String,
+        checked: Boolean,
+        enabled: Boolean,
+        onCheckedChange: (Boolean) -> Unit
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = enabled) { onCheckedChange(!checked) },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = text)
+            Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+        }
+    }
 
-                        val maxRequestedTotal = MAX_PACKET_JUMPS - if (randomEnabled) RANDOM_JUMP_MAX else 0
-                        if (requestedTotal == null || requestedTotal <= 0 || requestedTotal > maxRequestedTotal) {
-                            autoError = "目标跳数需为 1~$maxRequestedTotal 的整数"
-                            return@Button
-                        }
-                        if (decel == null) {
-                            autoError = "减速率需为 0~1 之间的小数"
-                            return@Button
-                        }
-
-                        val randomAdded = if (randomEnabled) (0..RANDOM_JUMP_MAX).random() else 0
-                        val total = requestedTotal + randomAdded
-                        val avgJpm: Double
-                        val totalSec: Long
-                        if (autoMode == AUTO_MODE_TIME) {
-                            if (requestedTimeSec == null || requestedTimeSec <= 0 || requestedTimeSec > 60000) {
-                                autoError = "目标时间需为 1~60000 秒"
-                                return@Button
-                            }
-                            totalSec = requestedTimeSec
-                            avgJpm = total.toDouble() / totalSec * 60.0
-                        } else {
-                            if (requestedSpeed == null || requestedSpeed <= 0 || requestedSpeed > 60000) {
-                                autoError = "平均速度需为 1~60000 次/分钟"
-                                return@Button
-                            }
-                            avgJpm = requestedSpeed.toDouble()
-                            totalSec = ceil(total.toDouble() / avgJpm * 60.0).toLong().coerceAtLeast(1L)
-                            if (totalSec > 60000) {
-                                autoError = "按当前速度预计用时超过 60000 秒"
-                                return@Button
-                            }
-                        }
-                        prefs.edit()
-                            .putInt(KEY_TARGET_JUMPS, requestedTotal)
-                            .putInt(KEY_TARGET_TIME, targetTimeStr.toIntOrNull() ?: DEFAULT_TARGET_TIME)
-                            .putInt(KEY_TARGET_SPEED, targetSpeedStr.toIntOrNull() ?: DEFAULT_TARGET_SPEED)
-                            .putString(KEY_AUTO_MODE, autoMode)
-                            .putString(KEY_DECEL_RATE, decelRateStr)
-                            .putBoolean(KEY_RANDOM_ENABLED, randomEnabled)
-                            .putBoolean(KEY_KEEP_SCREEN_ON, keepScreenOnEnabled)
-                            .apply()
-
-                        autoTotal = total
-                        autoRandomAdded = randomAdded
-                        autoTotalSec = totalSec
-                        autoProgress = 0
-                        autoElapsedSec = 0L
-                        autoCurrentSpeed = avgJpm
-                        autoError = ""
-                        isAutoRunning = true
-                        isAutoPaused = false
-                        setKeepScreenOn(keepScreenOnEnabled)
-
-                        autoJob = autoScope.launch {
-                            blePeripheralManager.notifySubscribers(hexStringToByteArray("6F0201000072"))
-
-                            var elapsed = 0L
-                            var current = 0
-                            while (elapsed < totalSec && current < total && isActive) {
-                                delay(1000L)
-                                if (isAutoPaused) {
-                                    continue
-                                }
-
-                                elapsed++
-                                val speed = calcCurrentSpeed(elapsed, totalSec, avgJpm, decel)
-                                val increment = (speed / 60).roundToInt().coerceAtLeast(1)
-                                current = if (elapsed >= totalSec) {
-                                    total
-                                } else {
-                                    minOf(total, current + increment)
-                                }
-                                autoProgress = current
-                                autoCurrentSpeed = speed
-                                autoElapsedSec = elapsed
-                                blePeripheralManager.notifySubscribers(buildJumpPacket(current))
-                            }
-
-                            if (isActive) {
-                                blePeripheralManager.notifySubscribers(buildJumpPacket(total))
-                                prefs.edit().putInt(KEY_LAST_USED_TARGET_JUMPS, total).apply()
-                            }
-                            isAutoRunning = false
-                            isAutoPaused = false
-                            setKeepScreenOn(false)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("开始自动跳绳")
+    @Composable
+    private fun AutoRunStatus(
+        isAutoPaused: Boolean,
+        autoProgress: Int,
+        autoTotal: Int,
+        randomEnabled: Boolean,
+        autoRandomAdded: Int,
+        autoCurrentSpeed: Double,
+        autoElapsedSec: Long,
+        autoTotalSec: Long,
+        onPauseToggle: () -> Unit,
+        onStop: () -> Unit
+    ) {
+        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(text = "已完成：$autoProgress / $autoTotal 下", fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            if (randomEnabled) {
+                Text(text = "本次随机增加：$autoRandomAdded 下", fontSize = 14.sp, color = Color.Gray)
+            }
+            Text(text = "当前速度：${autoCurrentSpeed.roundToInt()} 次/分钟", fontSize = 14.sp, color = Color.Gray)
+            Text(
+                text = "用时：${formatTime(autoElapsedSec)}，剩余：${formatTime((autoTotalSec - autoElapsedSec).coerceAtLeast(0L))}",
+                fontSize = 14.sp,
+                color = Color.Gray
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onPauseToggle, modifier = Modifier.weight(1f)) {
+                    Text(if (isAutoPaused) "继续" else "暂停")
                 }
-            } else {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = "已完成：$autoProgress / $autoTotal 下",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (randomEnabled) {
-                        Text(
-                            text = "本次随机增加：$autoRandomAdded 下",
-                            fontSize = 14.sp,
-                            color = Color.Gray
-                        )
-                    }
-                    Text(
-                        text = "当前速度：${autoCurrentSpeed.roundToInt()} 次/分钟",
-                        fontSize = 14.sp,
-                        color = Color.Gray
-                    )
-                    Text(
-                        text = "用时：${formatTime(autoElapsedSec)}，剩余：${formatTime((autoTotalSec - autoElapsedSec).coerceAtLeast(0L))}",
-                        fontSize = 14.sp,
-                        color = Color.Gray
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = { isAutoPaused = !isAutoPaused },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(if (isAutoPaused) "继续" else "暂停")
-                        }
-                        Button(
-                            onClick = {
-                                autoJob?.cancel()
-                                isAutoRunning = false
-                                isAutoPaused = false
-                                setKeepScreenOn(false)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("停止")
-                        }
-                    }
+                Button(onClick = onStop, modifier = Modifier.weight(1f)) {
+                    Text("停止")
                 }
-            }
-
-            HorizontalDivider()
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "BLE 调试",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "广播：${if (blePeripheralManager.isAdvertising()) "运行中" else "未运行"}，订阅设备：${blePeripheralManager.subscriberCount()}",
-                        fontSize = 12.sp,
-                        color = Color.Gray
-                    )
-                }
-                TextButton(onClick = { clearDebugLogs() }) {
-                    Text("清空")
-                }
-            }
-
-            if (bleDebugLogs.isEmpty()) {
-                Text(
-                    text = "暂无收发记录",
-                    fontSize = 13.sp,
-                    color = Color.Gray
-                )
-            } else {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    bleDebugLogs.take(12).forEach { log ->
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            Text(
-                                text = "${log.time} [${log.direction}] ${log.title}",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            if (log.payload.isNotBlank()) {
-                                Text(
-                                    text = log.payload,
-                                    fontSize = 11.sp,
-                                    color = Color.Gray
-                                )
-                            }
-                            if (log.note.isNotBlank()) {
-                                Text(
-                                    text = "备注：${log.note}",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-                    }
-                    if (bleDebugLogs.size > 12) {
-                        Text(
-                            text = "仅显示最近 12 条，内存中保留最近 50 条",
-                            fontSize = 11.sp,
-                            color = Color.Gray
-                        )
-                    }
-                }
-            }
-
-            if (showCustomDialog) {
-                AlertDialog(
-                    onDismissRequest = {
-                        showCustomDialog = false
-                        customHex = ""
-                        customError = ""
-                    },
-                    title = { Text(text = "发送自定义 Hex") },
-                    text = {
-                        Column {
-                            Text(text = "请输入十六进制字符串，例如 6F0201000072：", fontSize = 12.sp)
-                            TextField(
-                                value = customHex,
-                                onValueChange = {
-                                    customHex = it
-                                    customError = ""
-                                },
-                                placeholder = { Text(text = "Hex 字符串") },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            if (customError.isNotEmpty()) {
-                                Text(text = customError, color = Color.Red, fontSize = 12.sp)
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                val hex = customHex.replace("\\s".toRegex(), "")
-                                val ok = hex.matches(Regex("^[0-9a-fA-F]+$")) && hex.length % 2 == 0
-                                if (!ok) {
-                                    customError = "输入不是有效的偶数长度十六进制字符串"
-                                    return@TextButton
-                                }
-                                val payload = try {
-                                    hexStringToByteArray(hex)
-                                } catch (e: Exception) {
-                                    customError = "Hex 转换失败"
-                                    return@TextButton
-                                }
-                                blePeripheralManager.notifySubscribers(payload)
-                                showCustomDialog = false
-                                customHex = ""
-                            }
-                        ) {
-                            Text("发送")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = {
-                                showCustomDialog = false
-                                customHex = ""
-                                customError = ""
-                            }
-                        ) {
-                            Text("取消")
-                        }
-                    }
-                )
-            }
-
-            if (showDisclaimer) {
-                AlertDialog(
-                    onDismissRequest = { },
-                    title = { Text(text = "免责声明") },
-                    text = {
-                        Text(
-                            text = "本软件仅供蓝牙通信技术的交流与学习使用。严禁利用本软件进行任何形式的体育打卡作弊或虚假记录。因违规使用产生的一切后果由用户自行承担，开发者不承担任何法律责任。"
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { showDisclaimer = false }) {
-                            Text(text = "我知道了")
-                        }
-                    },
-                    dismissButton = null
-                )
-            }
-
-            val uriHandler = LocalUriHandler.current
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "by 风洒青泥",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "觉得好用吗？点这里前往 GitHub，给项目一个 Star 支持一下。",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.clickable {
-                        uriHandler.openUri("https://github.com/fasa70/Fake_Loop")
-                    }
-                )
             }
         }
+    }
+
+    @Composable
+    private fun DebugScreen(
+        logs: List<BleDebugLog>,
+        onClear: () -> Unit,
+        onOpenCustomDialog: () -> Unit
+    ) {
+        PageTitle(title = "BLE 调试", subtitle = "查看收发包、协议备注和客户端写入。")
+        Text(
+            text = "广播：${if (blePeripheralManager.isAdvertising()) "运行中" else "未运行"}，订阅设备：${blePeripheralManager.subscriberCount()}",
+            fontSize = 13.sp,
+            color = Color.Gray
+        )
+        Button(onClick = onOpenCustomDialog, modifier = Modifier.fillMaxWidth()) {
+            Text("发送自定义 Hex")
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onClear) {
+                Text("清空日志")
+            }
+        }
+        DebugLogList(logs = logs)
+    }
+
+    @Composable
+    private fun DebugLogList(logs: List<BleDebugLog>) {
+        if (logs.isEmpty()) {
+            Text(text = "暂无收发记录", fontSize = 13.sp, color = Color.Gray)
+            return
+        }
+
+        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            logs.take(20).forEach { log ->
+                DebugLogItem(log)
+            }
+            if (logs.size > 20) {
+                Text(text = "仅显示最近 20 条，内存中保留最近 50 条", fontSize = 11.sp, color = Color.Gray)
+            }
+        }
+    }
+
+    @Composable
+    private fun DebugLogItem(log: BleDebugLog) {
+        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = "${log.time} [${log.direction}] ${log.title}",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+            if (log.payload.isNotBlank()) {
+                Text(text = log.payload, fontSize = 11.sp, color = Color.Gray)
+            }
+            if (log.note.isNotBlank()) {
+                Text(text = "备注：${log.note}", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+
+    @Composable
+    private fun SettingsScreen(onShowDisclaimer: () -> Unit) {
+        val uriHandler = LocalUriHandler.current
+        PageTitle(title = "设置", subtitle = "低频配置、说明和项目信息。")
+        Text(text = "设备名：$targetBtName", fontSize = 14.sp)
+        Text(
+            text = "若小程序扫描不到设备，请检查是否给予 Fake Loop 所需权限，或在系统设置里修改设备名称。",
+            fontSize = 13.sp,
+            color = Color.Gray
+        )
+        Text(text = "版本：1.1.0 (3)", fontSize = 14.sp)
+        Button(onClick = onShowDisclaimer, modifier = Modifier.fillMaxWidth()) {
+            Text("查看免责声明")
+        }
+        Button(
+            onClick = { uriHandler.openUri("https://github.com/fasa70/Fake_Loop") },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("打开 GitHub")
+        }
+        Text(
+            text = "by 风洒青泥",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+
+    @Composable
+    private fun CustomHexDialog(
+        customHex: String,
+        customError: String,
+        onHexChange: (String) -> Unit,
+        onDismiss: () -> Unit,
+        onSend: () -> Unit
+    ) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(text = "发送自定义 Hex") },
+            text = {
+                Column {
+                    Text(text = "请输入十六进制字符串，例如 6F0201000072：", fontSize = 12.sp)
+                    TextField(
+                        value = customHex,
+                        onValueChange = onHexChange,
+                        placeholder = { Text(text = "Hex 字符串") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (customError.isNotEmpty()) {
+                        Text(text = customError, color = Color.Red, fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onSend) {
+                    Text("发送")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    @Composable
+    private fun DisclaimerDialog(onDismiss: () -> Unit) {
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text(text = "免责声明") },
+            text = {
+                Text(
+                    text = "本软件仅供蓝牙通信技术的交流与学习使用。严禁利用本软件进行任何形式的体育打卡作弊或虚假记录。因违规使用产生的一切后果由用户自行承担，开发者不承担任何法律责任。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = onDismiss) {
+                    Text(text = "我知道了")
+                }
+            },
+            dismissButton = null
+        )
     }
 
     override fun onDestroy() {

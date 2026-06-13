@@ -29,6 +29,7 @@ class BlePeripheralManager(private val context: Context) {
 
     private val subscribedDevices = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
     var debugListener: ((direction: String, title: String, payload: String, note: String) -> Unit)? = null
+    var startRequestListener: (() -> Unit)? = null
 
     fun isAdvertising(): Boolean = advertisingActive
     fun subscriberCount(): Int = subscribedDevices.size
@@ -241,6 +242,7 @@ class BlePeripheralManager(private val context: Context) {
             }
             if (characteristic.uuid == CHAR_RW_UUID && value.contentEqualsSafe(START_REQUEST)) {
                 notifySubscribers(START_RESPONSE, "收到客户端开始请求，自动回发开始包")
+                startRequestListener?.invoke()
             }
         }
     }
